@@ -168,11 +168,14 @@ K = CAPACIDADE_BUFFER
 
 if rho != 1.0:
     teorico_pb = (rho**K * (1 - rho)) / (1 - rho**(K + 1))
-    teorico_L = (rho / (1 - rho)) - ((K + 1) * rho**(K + 1)) / (1 - rho**(K + 1))
+    # Definicao baseada no material do professor:
+    teorico_L = (rho * (1 + K * rho**(K + 1) - (K + 1) * rho**K)) / ((1 - rho) * (1 - rho**(K + 1)))
 else:
     teorico_pb = 1.0 / (K + 1)
     teorico_L = K / 2.0
+
 teorico_W = teorico_L / (lambda_analise * (1 - teorico_pb))
+vazao_efetiva_teorica = lambda_analise * (1 - teorico_pb)
 
 print("\n[METRICAS DA CAMADA DE REDE (IoT -> Gateway)]")
 print(f"Total de Logs Gerados pelo IoT: {stats['logs_gerados']}")
@@ -190,6 +193,7 @@ print("-" * 30)
 print(f"Prob. Bloqueio: Simulado={prob_bloqueio:.4f} | Teorico={teorico_pb:.4f}")
 print(f"Ocupacao Media (L): Simulado={l_medio:.2f} | Teorico={teorico_L:.2f}")
 print(f"Latencia Media (W): Simulado={np.mean(stats['latencia_rede'])*1000:.2f} ms | Teorico={teorico_W*1000:.2f} ms")
+print(f"Vazao Efetiva: Simulado={vazao_sucesso:.2f} logs/s | Teorico={vazao_efetiva_teorica:.2f} logs/s")
 
 print("\n[METRICAS DO SISTEMA DISTRIBUIDO (Backend)]")
 print(f"Logs Salvos com Sucesso no Disco: {stats['logs_armazenados']}")
