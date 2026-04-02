@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt
 # Tráfego
 LAMBDA_IOT = 100.0         # Taxa de chegada de logs dos sensores (logs/s)
 LAMBDA_CONSULTA = 10.0     # Taxa de buscas feitas por usuários externos (consultas/s)
+TEMPO_SIMULACAO = 1000     # Tempo total de simulação
+INTERVALO_MONITOR = 0.1    # Frequência de amostragem para métricas temporais
 
 # Rede (Camada Física e Enlace)
 LARGURA_BANDA = 1e6        # 1 Mbps
@@ -41,7 +43,10 @@ stats = {
     'consultas_completas': 0,
     'latencia_rede': [],          # Tempo só na camada de comunicação
     'latencia_ponta_a_ponta': [], # Tempo desde a criação até salvar no disco
-    'latencia_recuperacao': []    # Tempo que o usuário espera pela busca
+    'latencia_recuperacao': [],   # Tempo que o usuário espera pela busca
+    'ocupacao_sistema': [],       # Amostras de (fila + servidor) ao longo do tempo
+    'utilizacao_canal': [],       # 1 se ocupado, 0 se livre
+    'amostras_tempo': []
 }
 
 # =======================================================================
@@ -56,7 +61,7 @@ def fluxo_completo_log(env, nome, canal_rf, cpu, disco, stats):
     # ---------------------------------------------------------
     # FASE 1: COMUNICAÇÃO DE DADOS (Enlace e Físico)
     # ---------------------------------------------------------
-    if len(canal_rf.queue) >= CAPACIDADE_BUFFER:
+    if (len(canal_rf.queue) + canal_rf.count) >= CAPACIDADE_BUFFER: 
         stats['logs_perda_buffer'] += 1
         return # Pacote descartado na rede
 
@@ -66,29 +71,32 @@ def fluxo_completo_log(env, nome, canal_rf, cpu, disco, stats):
     sucesso_rede = False
     tentativas = 0
 
-    while tentativas < LIMITE_TENTATIVAS and not sucesso_rede:
-        tentativas += 1
-        with canal_rf.request() as req_rede:
-            yield req_rede # Aguarda o meio ficar livre
+    # No modelo Stop-and-Wait, o nó segura o canal até o sucesso ou exaustão de tentativas
+    with canal_rf.request() as req_rede:
+        yield req_rede
+        
+        while tentativas < LIMITE_TENTATIVAS and not sucesso_rede:
+            tentativas += 1
             
-            ber_atual = BER_BASE * random.uniform(0.5, 1.5)
+            # BER com leve flutuação para representar desvanecimento (fading) real
+            ber_atual = BER_BASE * random.uniform(0.8, 1.2)
+            
+            # Cálculo do tempo de serviço (Transmissão + Propagação)
+            atraso_prop = DISTANCIA / VEL_SINAL # Latência física constante
             atraso_tx = tamanho_total_bits / LARGURA_BANDA
-            atraso_prop = DISTANCIA / VEL_SINAL
             
             yield env.timeout(atraso_tx + atraso_prop)
             
-            prob_sucesso = (1 - ber_atual) ** tamanho_total_bits
-            if random.random() < prob_sucesso:
+            if random.random() < (1 - ber_atual) ** tamanho_total_bits:
                 sucesso_rede = True
                 stats['latencia_rede'].append(env.now - chegada_sistema)
+            elif tentativas < LIMITE_TENTATIVAS:
+                stats['total_retransmissoes'] += 1
             else:
-                if tentativas < LIMITE_TENTATIVAS:
-                    stats['total_retransmissoes'] += 1
-                else:
-                    stats['logs_erro_bit'] += 1
+                stats['logs_erro_bit'] += 1
 
     if not sucesso_rede:
-        return # O dado "morreu" na rede e não chega aos servidores
+        return # O log não chega aos servidores
 
     # ---------------------------------------------------------
     # FASE 2: SISTEMA DISTRIBUÍDO (Processamento e Armazenamento)
@@ -139,6 +147,16 @@ def gerador_trafego_iot(env, canal_rf, cpu, disco, stats):
         i += 1
         env.process(fluxo_completo_log(env, f'Log_{i}', canal_rf, cpu, disco, stats))
 
+def monitorar_sistema(env, canal_rf, stats):
+    """Coleta amostras periódicas do estado da fila e do servidor."""
+    while True:
+        # N = itens na fila + item sendo servido
+        n_sistema = len(canal_rf.queue) + canal_rf.count
+        stats['ocupacao_sistema'].append(n_sistema)
+        stats['utilizacao_canal'].append(canal_rf.count) # 1 ou 0
+        stats['amostras_tempo'].append(env.now)
+        yield env.timeout(INTERVALO_MONITOR)
+
 
 # =======================================================================
 # --- 4. EXECUÇÃO DA SIMULAÇÃO ---
@@ -146,7 +164,7 @@ def gerador_trafego_iot(env, canal_rf, cpu, disco, stats):
 print("--- Iniciando Simulação End-to-End do Ecossistema IoT ---")
 env = simpy.Environment()
 
-# Inicialização dos Recursos Compartilhados
+# Inicialização dos Recursos Compartilhados (FCFS por padrão)
 canal_rf = simpy.Resource(env, capacity=1)
 servidor_cpu = simpy.Resource(env, capacity=CAPACIDADE_CPU)
 armazenamento_disco = simpy.Resource(env, capacity=CAPACIDADE_DISCO)
@@ -154,20 +172,58 @@ armazenamento_disco = simpy.Resource(env, capacity=CAPACIDADE_DISCO)
 # Injeção de Processos no Ambiente
 env.process(gerador_trafego_iot(env, canal_rf, servidor_cpu, armazenamento_disco, stats))
 env.process(fluxo_recuperacao_usuario(env, servidor_cpu, armazenamento_disco, stats))
+env.process(monitorar_sistema(env, canal_rf, stats))
 
 # Roda o mundo por 1000 segundos
-env.run(until=1000) 
+env.run(until=TEMPO_SIMULACAO) 
 
 
 # =======================================================================
 # --- 5. RELATÓRIO CIENTÍFICO ---
 # =======================================================================
+prob_bloqueio = stats['logs_perda_buffer'] / stats['logs_gerados'] if stats['logs_gerados'] > 0 else 0
+vazao_sucesso = stats['logs_armazenados'] / TEMPO_SIMULACAO
+utilizacao_media = np.mean(stats['utilizacao_canal']) * 100
+l_medio = np.mean(stats['ocupacao_sistema'])
+
+# --- CÁLCULOS TEÓRICOS (M/M/1/K) PARA VALIDAÇÃO ---
+# Estimativa de mu (taxa de serviço) baseada no tempo médio de transmissão
+# --- CÁLCULOS TEÓRICOS REFINADOS ---
+tempo_servico_medio = (TAMANHO_LOG_AVG + CABECALHO) / LARGURA_BANDA + (DISTANCIA / VEL_SINAL)
+mu = 1.0 / tempo_servico_medio
+# Probabilidade de erro de quadro (Frame Error Rate)
+fer = 1 - (1 - BER_BASE)**(TAMANHO_LOG_AVG + CABECALHO)
+# No M/M/1/K com retransmissões, a taxa de serviço efetiva diminui.
+# E[N_tentativas] = (1 - FER^Limit) / (1 - FER)
+n_medio_tentativas = (1 - fer**LIMITE_TENTATIVAS) / (1 - fer)
+mu_efetivo = 1.0 / (tempo_servico_medio * n_medio_tentativas)
+
+mu = mu_efetivo
+rho = LAMBDA_IOT / mu
+K = CAPACIDADE_BUFFER
+
+if rho != 1.0:
+    teorico_pb = (rho**K * (1 - rho)) / (1 - rho**(K + 1))
+    teorico_L = (rho / (1 - rho)) - ((K + 1) * rho**(K + 1)) / (1 - rho**(K + 1))
+else:
+    teorico_pb = 1.0 / (K + 1)
+    teorico_L = K / 2.0
+teorico_W = teorico_L / (LAMBDA_IOT * (1 - teorico_pb))
+
 print("\n[MÉTRICAS DA CAMADA DE REDE (IoT -> Gateway)]")
 print(f"Total de Logs Gerados pelo IoT: {stats['logs_gerados']}")
-print(f"Descartes por Buffer Cheio: {stats['logs_perda_buffer']}")
+print(f"Descartes por Buffer Cheio: {stats['logs_perda_buffer']} (Prob. Bloqueio: {prob_bloqueio:.4f})")
 print(f"Falhas Irrecuperáveis (Erro de Bit): {stats['logs_erro_bit']}")
 print(f"Total de Retransmissões (ARQ): {stats['total_retransmissoes']}")
+print(f"Utilização Média do Canal (Rho): {utilizacao_media:.2f}%")
 print(f"Latência Média de Rede: {np.mean(stats['latencia_rede'])*1000:.2f} ms")
+print(f"Número Médio de Logs no Sistema (L): {l_medio:.2f}")
+
+print("\n[VALIDAÇÃO TEÓRICA (M/M/1/K c/ Taxa Efetiva)]")
+print(f"Prob. Bloqueio: Simulado={prob_bloqueio:.4f} | Teórico={teorico_pb:.4f}")
+print(f"Ocupação Média (L): Simulado={l_medio:.2f} | Teórico={teorico_L:.2f}")
+print(f"Latência Média (W): Simulado={np.mean(stats['latencia_rede'])*1000:.2f} ms | Teórico={teorico_W*1000:.2f} ms")
+print(f"Nota: Pequenas divergências são esperadas devido ao ARQ (Retransmissões) e constantes de rede.")
 
 print("\n[MÉTRICAS DO SISTEMA DISTRIBUÍDO (Backend)]")
 print(f"Logs Salvos com Sucesso no Disco: {stats['logs_armazenados']}")
