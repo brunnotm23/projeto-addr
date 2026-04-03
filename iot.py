@@ -193,7 +193,8 @@ def plotar_graficos(stats):
 
 def executar_simulacao(cenario_escolhido):
     """Prepara o ambiente SimPy e roda baseado no cenário escolhido."""
-    print(f"\n--- Iniciando Simulação (Cenário {cenario_escolhido}) ---")
+    banda_kbps = CONFIG['LARGURA_BANDA'] / 1000
+    print(f"\n--- Iniciando Simulação (Cenário {cenario_escolhido} | Banda: {banda_kbps} kbps) ---")
     
     # Estruturas de Dados zeradas para cada nova execução
     stats = {
@@ -237,15 +238,36 @@ def main():
         print("Escolha o cenário que deseja executar:")
         print("1 - Cenário Normal (Tráfego Contínuo)")
         print("2 - Cenário de Falha (Queda de Sinal e Reconexão em Massa)")
+        print("3 - Cenário com Largura de Banda Variável (Baixa, Média, Alta)")
         print("0 - Sair do Programa")
         
-        escolha = input("Digite a opção (0, 1 ou 2): ").strip()
+        escolha = input("Digite a opção (0, 1, 2 ou 3): ").strip()
         
         if escolha == '0':
             print("Encerrando o simulador")
             break
         elif escolha in ['1', '2']:
+            # Reseta para o padrão caso venha do cenário 3
+            CONFIG['LARGURA_BANDA'] = 1e6
+            CONFIG['MU_REDE'] = CONFIG['LARGURA_BANDA'] / CONFIG['TAMANHO_LOG_AVG']
             executar_simulacao(escolha)
+        elif escolha == '3':
+            print("\nEscolha o perfil de Largura de Banda:")
+            print("1 - Baixa (100 Kbps - Possível gargalo)")
+            print("2 - Média (1 Mbps - Padrão)")
+            print("3 - Alta  (10 Mbps - Rede folgada)")
+            bw_escolha = input("Digite a opção (1, 2 ou 3): ").strip()
+            
+            if bw_escolha == '1':
+                CONFIG['LARGURA_BANDA'] = 100e3
+            elif bw_escolha == '3':
+                CONFIG['LARGURA_BANDA'] = 10e6
+            else:
+                CONFIG['LARGURA_BANDA'] = 1e6 # Default (Media)
+                
+            # Recalcula a taxa de serviço da rede (Mu)
+            CONFIG['MU_REDE'] = CONFIG['LARGURA_BANDA'] / CONFIG['TAMANHO_LOG_AVG']
+            executar_simulacao('3')
         else:
             print("Opção inválida! Por favor, tente novamente")
 
