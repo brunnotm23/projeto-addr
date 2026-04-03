@@ -4,52 +4,29 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # =======================================================================
-# --- 1. PARÂMETROS GERAIS DO SISTEMA DISTRIBUÍDO E REDE ---
+# --- 1. PARÂMETROS GERAIS E CONFIGURAÇÕES ---
 # =======================================================================
 
-# Tráfego
-LAMBDA_IOT = 60.0         # Taxa de chegada de logs dos sensores (logs/s)
-LAMBDA_CONSULTA = 10.0     # Taxa de buscas feitas por usuários externos (consultas/s)
-TEMPO_SIMULACAO = 1000     # Tempo total de simulação
-INTERVALO_MONITOR = 0.1    # Frequência de amostragem para métricas temporais
-
-# Rede (Camada Física e Enlace)
-LARGURA_BANDA = 1e6        # Larguda da Banda em bps
-TAMANHO_LOG_AVG = 1024 * 8 # Payload médio em bits
-CAPACIDADE_BUFFER = 50     # K da Fila do Gateway
-
-# Taxa de serviço (mu) = Banda / Tamanho Médio
-MU_REDE = LARGURA_BANDA / TAMANHO_LOG_AVG
-
-# Servidores (Data Center / Nuvem)
-CAPACIDADE_CPU = 1         # Quantidade de processadores
-CAPACIDADE_DISCO = 1       # Quantidade de discos de armazenamento
-TEMPO_PROC_AVG = 0.005     # Tempo médio de processamento 
-TEMPO_PROC_QUERY_AVG = 0.002 # Tempo médio de processamento de query 
-TEMPO_DISCO_AVG = 0.005    # Tempo médio de gravação no disco 
-TEMPO_BUSCA_AVG = 0.010    # Tempo médio de leitura/busca no disco 
-
-# =======================================================================
-# --- 2. COLETA DE DADOS (MÉTRICAS) ---
-# =======================================================================
-stats = {
-    'logs_gerados': 0,
-    'logs_perda_buffer': 0,
-    'logs_erro_bit': 0,
-    'total_retransmissoes': 0,
-    'logs_armazenados': 0,
-    'consultas_geradas': 0,
-    'consultas_completas': 0,
-    'latencia_rede': [],          # Tempo só na camada de comunicação
-    'latencia_ponta_a_ponta': [], # Tempo desde a criação até salvar no disco
-    'latencia_recuperacao': [],   # Tempo que o usuário espera pela busca
-    'ocupacao_sistema': [],       # Amostras de (fila + servidor) ao longo do tempo
-    'utilizacao_canal': [],       # 1 se ocupado, 0 se livre
-    'amostras_tempo': []
+CONFIG = {
+    'LAMBDA_IOT': 60.0,          # Taxa de chegada normal (logs/s)
+    'LAMBDA_CONSULTA': 10.0,     # Consultas de usuários (consultas/s)
+    'TEMPO_SIMULACAO': 1000,     # Tempo total (segundos)
+    'INTERVALO_MONITOR': 0.1,    # Frequência do monitoramento
+    'LARGURA_BANDA': 1e6,        # bps
+    'TAMANHO_LOG_AVG': 1024 * 8, # bits
+    'CAPACIDADE_BUFFER': 50,     # Capacidade da Fila (K)
+    'CAPACIDADE_CPU': 1,
+    'CAPACIDADE_DISCO': 1,
+    'TEMPO_PROC_AVG': 0.005,
+    'TEMPO_PROC_QUERY_AVG': 0.002,
+    'TEMPO_DISCO_AVG': 0.005,
+    'TEMPO_BUSCA_AVG': 0.010,
 }
 
+CONFIG['MU_REDE'] = CONFIG['LARGURA_BANDA'] / CONFIG['TAMANHO_LOG_AVG']
+
 # =======================================================================
-# --- 3. PROCESSOS DO SISTEMA ---
+# --- 2. PROCESSOS DO SISTEMA DISTRIBUÍDO ---
 # =======================================================================
 
 def fluxo_completo_log(env, nome, canal_rf, cpu, disco, stats):
@@ -57,188 +34,220 @@ def fluxo_completo_log(env, nome, canal_rf, cpu, disco, stats):
     chegada_sistema = env.now
     stats['logs_gerados'] += 1
     
-    # ---------------------------------------------------------
-    # FASE 1: COMUNICAÇÃO DE DADOS (Enlace e Físico)
-    # ---------------------------------------------------------
-    # M/M/1/K: Sistema bloqueia se fila + servidor estiverem cheios
-    if (len(canal_rf.queue) + canal_rf.count) >= CAPACIDADE_BUFFER: 
+    # M/M/1/K: Bloqueia se a fila + servidor estiverem cheios
+    if (len(canal_rf.queue) + canal_rf.count) >= CONFIG['CAPACIDADE_BUFFER']: 
         stats['logs_perda_buffer'] += 1
-        return # Pacote descartado na rede
+        return
 
     with canal_rf.request() as req_rede:
         yield req_rede
-        # M/M/1/K: Tempo de serviço deve ser exponencial
-        yield env.timeout(random.expovariate(MU_REDE))
+        yield env.timeout(random.expovariate(CONFIG['MU_REDE']))
         stats['latencia_rede'].append(env.now - chegada_sistema)
 
-    # ---------------------------------------------------------
-    # FASE 2: SISTEMA DISTRIBUÍDO (Processamento e Armazenamento)
-    # ---------------------------------------------------------
-    # Passa pela CPU para validação/parsing
     with cpu.request() as req_cpu:
         yield req_cpu
-        yield env.timeout(random.expovariate(1.0 / TEMPO_PROC_AVG))
+        yield env.timeout(random.expovariate(1.0 / CONFIG['TEMPO_PROC_AVG']))
         
-    # Salva no Banco de Dados / Disco
     with disco.request() as req_disco:
         yield req_disco
-        yield env.timeout(random.expovariate(1.0 / TEMPO_DISCO_AVG))
+        yield env.timeout(random.expovariate(1.0 / CONFIG['TEMPO_DISCO_AVG']))
         
     stats['logs_armazenados'] += 1
     stats['latencia_ponta_a_ponta'].append(env.now - chegada_sistema)
 
 
 def fluxo_recuperacao_usuario(env, cpu, disco, stats):
-    """Gera requisições de usuários externos querendo ler logs."""
+    """Gera requisições de usuários externos."""
     while True:
-        yield env.timeout(random.expovariate(LAMBDA_CONSULTA))
+        yield env.timeout(random.expovariate(CONFIG['LAMBDA_CONSULTA']))
         stats['consultas_geradas'] += 1
         env.process(executar_busca(env, cpu, disco, stats))
 
 def executar_busca(env, cpu, disco, stats):
-    """Simula a carga de uma query de recuperação no sistema."""
+    """Simula a carga de uma query."""
     inicio_busca = env.now
     
     with cpu.request() as req_cpu:
         yield req_cpu
-        # Para M/M/1/K, todo tempo de servico deve ser exponencial
-        yield env.timeout(random.expovariate(1.0 / TEMPO_PROC_QUERY_AVG)) 
+        yield env.timeout(random.expovariate(1.0 / CONFIG['TEMPO_PROC_QUERY_AVG'])) 
         
         with disco.request() as req_disco:
             yield req_disco
-            # O disco é o gargalo: demora mais para buscar do que para escrever
-            yield env.timeout(random.expovariate(1.0 / TEMPO_BUSCA_AVG))
+            yield env.timeout(random.expovariate(1.0 / CONFIG['TEMPO_BUSCA_AVG']))
             
     stats['consultas_completas'] += 1
     stats['latencia_recuperacao'].append(env.now - inicio_busca)
 
 
-def gerador_trafego_iot(env, canal_rf, cpu, disco, stats):
-    """Gera a chegada de logs dos dispositivos."""
+def gerador_trafego_iot(env, canal_rf, cpu, disco, stats, estado_rede):
+    """Gera a chegada de logs. Se a rede cair, acumula no backlog."""
     i = 0
     while True:
-        yield env.timeout(random.expovariate(LAMBDA_IOT))
+        yield env.timeout(random.expovariate(CONFIG['LAMBDA_IOT']))
         i += 1
-        env.process(fluxo_completo_log(env, f'Log_{i}', canal_rf, cpu, disco, stats))
+        
+        if estado_rede['sinal_ativo']:
+            env.process(fluxo_completo_log(env, f'Log_{i}', canal_rf, cpu, disco, stats))
+        else:
+            estado_rede['backlog'] += 1 # Dispositivo guarda localmente sem enviar
+
+def disparar_log_com_atraso(env, atraso, nome, canal_rf, cpu, disco, stats):
+    """Função auxiliar: Espera um tempinho aleatório antes de tentar enviar o log."""
+    yield env.timeout(atraso)
+    # Chama o fluxo principal (que em breve terá a lógica de retransmissão do seu colega)
+    env.process(fluxo_completo_log(env, nome, canal_rf, cpu, disco, stats))
+
+def evento_queda_sinal(env, canal_rf, cpu, disco, stats, estado_rede):
+    """Cenário 2: Simula uma queda de rede e a reconexão com Jitter (espalhamento)."""
+    yield env.timeout(300)
+    print(f"\n[{env.now:.1f}s] ALERTA: Sinal de RF caiu! Dispositivos acumulando logs...")
+    estado_rede['sinal_ativo'] = False
+    
+    yield env.timeout(100)
+    print(f"[{env.now:.1f}s] ALERTA: Sinal restaurado! Enviando {estado_rede['backlog']} logs retidos...")
+    estado_rede['sinal_ativo'] = True
+    
+    # Aplica o JITTER: Espalha os pacotes aleatoriamente em uma janela de tempo
+    janela_espalhamento = 0.5 #Em segundos 
+    
+    for i in range(estado_rede['backlog']):
+        atraso_aleatorio = random.uniform(0.0, janela_espalhamento)
+        env.process(disparar_log_com_atraso(
+            env, atraso_aleatorio, f'Log_Backlog_{i}', canal_rf, cpu, disco, stats
+        ))
+    
+    estado_rede['backlog'] = 0
+
 
 def monitorar_sistema(env, canal_rf, stats):
-    """Coleta amostras periódicas do estado da fila e do servidor."""
+    """Coleta amostras do estado da fila."""
     while True:
-        # N = itens na fila + item sendo servido
         n_sistema = len(canal_rf.queue) + canal_rf.count
         stats['ocupacao_sistema'].append(n_sistema)
-        stats['utilizacao_canal'].append(canal_rf.count) # 1 ou 0
+        stats['utilizacao_canal'].append(canal_rf.count)
         stats['amostras_tempo'].append(env.now)
-        yield env.timeout(INTERVALO_MONITOR)
+        yield env.timeout(CONFIG['INTERVALO_MONITOR'])
 
 
 # =======================================================================
-# --- 4. EXECUÇÃO DA SIMULAÇÃO ---
+# --- 3. FUNÇÕES DE RELATÓRIO E GRÁFICOS ---
 # =======================================================================
-print("--- Iniciando Simulacao End-to-End do Ecossistema IoT ---")
-env = simpy.Environment()
 
-# Inicialização dos Recursos Compartilhados (FCFS por padrão)
-canal_rf = simpy.Resource(env, capacity=1)
-servidor_cpu = simpy.Resource(env, capacity=CAPACIDADE_CPU)
-armazenamento_disco = simpy.Resource(env, capacity=CAPACIDADE_DISCO)
+def imprimir_relatorio(stats):
+    """Calcula e imprime as métricas finais."""
+    prob_bloqueio = stats['logs_perda_buffer'] / stats['logs_gerados'] if stats['logs_gerados'] > 0 else 0
+    utilizacao_media = np.mean(stats['utilizacao_canal']) * 100
+    l_medio = np.mean(stats['ocupacao_sistema'])
 
-# Injeção de Processos no Ambiente
-env.process(gerador_trafego_iot(env, canal_rf, servidor_cpu, armazenamento_disco, stats))
-env.process(fluxo_recuperacao_usuario(env, servidor_cpu, armazenamento_disco, stats))
-env.process(monitorar_sistema(env, canal_rf, stats))
+    print("\n" + "="*50)
+    print(" RELATÓRIO FINAL DA SIMULAÇÃO ")
+    print("="*50)
+    print(f"Total de Logs Tentaram Entrar: {stats['logs_gerados']}")
+    print(f"Descartes por Buffer Cheio: {stats['logs_perda_buffer']} (Prob. Bloqueio: {prob_bloqueio:.4f})")
+    print(f"Utilização Média do Canal: {utilizacao_media:.2f}%")
+    
+    latencia_rede = np.mean(stats['latencia_rede']) * 1000 if stats['latencia_rede'] else 0
+    print(f"Latência Média de Rede: {latencia_rede:.2f} ms")
+    print(f"Número Médio de Logs no Sistema (L): {l_medio:.2f}")
 
-# Roda o mundo por 1000 segundos
-env.run(until=TEMPO_SIMULACAO) 
+    print(f"\n[BACKEND]")
+    print(f"Logs Salvos com Sucesso: {stats['logs_armazenados']}")
+    
+    latencia_end = np.mean(stats['latencia_ponta_a_ponta']) * 1000 if stats['latencia_ponta_a_ponta'] else 0
+    print(f"Latência Média PONTA-A-PONTA: {latencia_end:.2f} ms")
 
 
-# =======================================================================
-# --- 5. RELATÓRIO CIENTÍFICO ---
-# =======================================================================
-prob_bloqueio = stats['logs_perda_buffer'] / stats['logs_gerados'] if stats['logs_gerados'] > 0 else 0
-vazao_sucesso = stats['logs_armazenados'] / TEMPO_SIMULACAO
-utilizacao_media = np.mean(stats['utilizacao_canal']) * 100
-l_medio = np.mean(stats['ocupacao_sistema'])
+def plotar_graficos(stats):
+    """Plota os resultados visuais da simulação."""
+    plt.figure(figsize=(14, 10))
 
-# --- CÁLCULOS TEÓRICOS (M/M/1/K) PARA VALIDAÇÃO ---
-mu = MU_REDE 
-lambda_analise = LAMBDA_IOT 
-rho = lambda_analise / mu
-K = CAPACIDADE_BUFFER
+    # Gráfico 1: Ocupação do Buffer (Crucial para ver a reconexão em massa)
+    plt.subplot(2, 1, 1)
+    plt.plot(stats['amostras_tempo'], stats['ocupacao_sistema'], color='orange', linewidth=1)
+    plt.axhline(y=CONFIG['CAPACIDADE_BUFFER'], color='r', linestyle='--', label='Capacidade Máxima (K)')
+    plt.title('Ocupação do Gateway ao Longo do Tempo (Note o pico na reconexão)')
+    plt.xlabel('Tempo de Simulação (s)')
+    plt.ylabel('Logs no Sistema')
+    plt.legend()
 
-if rho != 1.0:
-    teorico_pb = (rho**K * (1 - rho)) / (1 - rho**(K + 1))
-    # Definicao baseada no material do professor:
-    teorico_L = (rho * (1 + K * rho**(K + 1) - (K + 1) * rho**K)) / ((1 - rho) * (1 - rho**(K + 1)))
-else:
-    teorico_pb = 1.0 / (K + 1)
-    teorico_L = K / 2.0
+    # Gráfico 2: Histograma de Latência
+    plt.subplot(2, 1, 2)
+    if stats['latencia_ponta_a_ponta']:
+        plt.hist([t * 1000 for t in stats['latencia_ponta_a_ponta']], bins=30, color='skyblue', edgecolor='black')
+        plt.title('Distribuição da Latência Ponta-a-Ponta')
+        plt.xlabel('Tempo (ms)')
+        plt.ylabel('Frequência')
 
-teorico_W = teorico_L / (lambda_analise * (1 - teorico_pb))
-vazao_efetiva_teorica = lambda_analise * (1 - teorico_pb)
+    plt.tight_layout()
+    
+    # Adicione estes avisos aqui:
+    print("\n[AVISO] Os gráficos foram abertos em uma nova janela.")
+    print(">>> FECHE A JANELA DO GRÁFICO PARA LIBERAR O MENU E CONTINUAR <<<")
 
-print("\n[METRICAS DA CAMADA DE REDE (IoT -> Gateway)]")
-print(f"Total de Logs Gerados pelo IoT: {stats['logs_gerados']}")
-print(f"Descartes por Buffer Cheio: {stats['logs_perda_buffer']} (Prob. Bloqueio: {prob_bloqueio:.4f})")
-print(f"Utilizacao Media do Canal (Rho): {utilizacao_media:.2f}%")
-print(f"Latencia Media de Rede: {np.mean(stats['latencia_rede'])*1000:.2f} ms")
-print(f"Numero Medio de Logs no Sistema (L): {l_medio:.2f}")
+    plt.show()
 
-print("\n[VALIDACAO TEORICA M/M/1/K]")
-print(f"Lambda (Taxa de Chegada): {LAMBDA_IOT:.2f} logs/s")
-print(f"Mu (Taxa de Servico): {mu:.2f} logs/s")
-print(f"Rho (Intensidade de Trafego): {rho:.4f}")
-print(f"K (Capacidade do Sistema): {K}")
-print("-" * 30)
-print(f"Prob. Bloqueio: Simulado={prob_bloqueio:.4f} | Teorico={teorico_pb:.4f}")
-print(f"Ocupacao Media (L): Simulado={l_medio:.2f} | Teorico={teorico_L:.2f}")
-print(f"Latencia Media (W): Simulado={np.mean(stats['latencia_rede'])*1000:.2f} ms | Teorico={teorico_W*1000:.2f} ms")
-print(f"Vazao Efetiva: Simulado={vazao_sucesso:.2f} logs/s | Teorico={vazao_efetiva_teorica:.2f} logs/s")
-
-print("\n[METRICAS DO SISTEMA DISTRIBUIDO (Backend)]")
-print(f"Logs Salvos com Sucesso no Disco: {stats['logs_armazenados']}")
-print(f"Consultas Completadas p/ Usuarios: {stats['consultas_completas']}")
-print(f"Latencia Media PONTA-A-PONTA (IoT -> Disco): {np.mean(stats['latencia_ponta_a_ponta'])*1000:.2f} ms")
-print(f"Tempo Medio de Recuperacao p/ Usuario: {np.mean(stats['latencia_recuperacao'])*1000:.2f} ms")
 
 # =======================================================================
-# --- 6. GERAÇÃO DE GRÁFICOS PARA O ARTIGO ---
+# --- 4. MOTOR PRINCIPAL E MENU INTERATIVO ---
 # =======================================================================
-plt.figure(figsize=(14, 10))
 
-# Grafico 1: Histograma de Latencia Ponta-a-Ponta
-plt.subplot(2, 2, 1)
-plt.hist([t * 1000 for t in stats['latencia_ponta_a_ponta']], bins=30, color='skyblue', edgecolor='black')
-plt.title('Distribuicao da Latencia Ponta-a-Ponta')
-plt.xlabel('Tempo (ms)')
-plt.ylabel('Frequencia')
+def executar_simulacao(cenario_escolhido):
+    """Prepara o ambiente SimPy e roda baseado no cenário escolhido."""
+    print(f"\n--- Iniciando Simulação (Cenário {cenario_escolhido}) ---")
+    
+    # Estruturas de Dados zeradas para cada nova execução
+    stats = {
+        'logs_gerados': 0, 'logs_perda_buffer': 0, 'logs_armazenados': 0,
+        'consultas_geradas': 0, 'consultas_completas': 0,
+        'latencia_rede': [], 'latencia_ponta_a_ponta': [], 'latencia_recuperacao': [],
+        'ocupacao_sistema': [], 'utilizacao_canal': [], 'amostras_tempo': []
+    }
+    
+    estado_rede = {'sinal_ativo': True, 'backlog': 0}
+    
+    # Inicializa o SimPy
+    env = simpy.Environment()
+    canal_rf = simpy.Resource(env, capacity=1)
+    servidor_cpu = simpy.Resource(env, capacity=CONFIG['CAPACIDADE_CPU'])
+    armazenamento_disco = simpy.Resource(env, capacity=CONFIG['CAPACIDADE_DISCO'])
 
-# Grafico 2: Evolucao da Ocupacao do Buffer (K)
-plt.subplot(2, 2, 2)
-plt.plot(stats['amostras_tempo'][:1000], stats['ocupacao_sistema'][:1000], color='orange', linewidth=0.5)
-plt.axhline(y=CAPACIDADE_BUFFER, color='r', linestyle='--', label='Capacidade K')
-plt.title('Ocupacao do Sistema ao Longo do Tempo (Amostra Inicial)')
-plt.xlabel('Tempo de Simulacao (s)')
-plt.ylabel('Logs no Sistema (n)')
-plt.legend()
+    # Processos Padrões
+    env.process(gerador_trafego_iot(env, canal_rf, servidor_cpu, armazenamento_disco, stats, estado_rede))
+    env.process(fluxo_recuperacao_usuario(env, servidor_cpu, armazenamento_disco, stats))
+    env.process(monitorar_sistema(env, canal_rf, stats))
 
-# Grafico 3: Probabilidade dos Estados P(n)
-plt.subplot(2, 2, 3)
-n_counts = np.bincount(stats['ocupacao_sistema'], minlength=CAPACIDADE_BUFFER+1)
-n_probs = n_counts / len(stats['ocupacao_sistema'])
-plt.bar(range(len(n_probs)), n_probs, color='purple', alpha=0.7)
-plt.title('Probabilidade de Estado P(n) - Simulado')
-plt.xlabel('Numero de Logs no Sistema (n)')
-plt.ylabel('Probabilidade')
+    # Processo Específico do Cenário 2
+    if cenario_escolhido == '2':
+        env.process(evento_queda_sinal(env, canal_rf, servidor_cpu, armazenamento_disco, stats, estado_rede))
 
-# Grafico 4: CDF da Latencia de Rede
-plt.subplot(2, 2, 4)
-sorted_lat = np.sort(stats['latencia_rede'])
-y_values = np.arange(len(sorted_lat)) / float(len(sorted_lat) - 1)
-plt.plot(sorted_lat * 1000, y_values, marker='.', linestyle='none', color='green')
-plt.title('CDF da Latencia de Rede')
-plt.xlabel('Tempo (ms)')
-plt.ylabel('Probabilidade Acumulada')
+    # Roda a simulação
+    env.run(until=CONFIG['TEMPO_SIMULACAO']) 
+    
+    # Exibe resultados
+    imprimir_relatorio(stats)
+    plotar_graficos(stats)
 
-plt.tight_layout()
-plt.show()
+
+def main():
+    """Menu principal do programa."""
+    while True:
+        print("\n" + "="*40)
+        print(" SIMULADOR IoT E FILAS M/M/1/K ")
+        print("="*40)
+        print("Escolha o cenário que deseja executar:")
+        print("1 - Cenário Normal (Tráfego Contínuo)")
+        print("2 - Cenário de Falha (Queda de Sinal e Reconexão em Massa)")
+        print("0 - Sair do Programa")
+        
+        escolha = input("Digite a opção (0, 1 ou 2): ").strip()
+        
+        if escolha == '0':
+            print("Encerrando o simulador")
+            break
+        elif escolha in ['1', '2']:
+            executar_simulacao(escolha)
+        else:
+            print("Opção inválida! Por favor, tente novamente")
+
+if __name__ == "__main__":
+    main()
