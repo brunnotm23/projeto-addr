@@ -229,6 +229,89 @@ def executar_simulacao(cenario_escolhido):
     plotar_graficos(stats)
 
 
+def plotar_graficos_comparativos(resultados):
+    """Plota os resultados comparativos das 3 bandas sobrepostas."""
+    plt.figure(figsize=(14, 10))
+    cores = ['red', 'blue', 'green']
+    
+    # Gráfico 1: Ocupação do Buffer
+    plt.subplot(2, 1, 1)
+    for (nome, stats), cor in zip(resultados.items(), cores):
+        plt.plot(stats['amostras_tempo'], stats['ocupacao_sistema'], label=nome, color=cor, linewidth=1.5, alpha=0.8)
+        
+    plt.axhline(y=CONFIG['CAPACIDADE_BUFFER'], color='black', linestyle='--', label='Capacidade Máxima (K)')
+    plt.title('Comparativo: Ocupação do Gateway vs Largura de Banda')
+    plt.xlabel('Tempo de Simulação (s)')
+    plt.ylabel('Logs no Sistema')
+    plt.legend()
+
+    # Gráfico 2: Histograma de Latência - Sobreposto
+    plt.subplot(2, 1, 2)
+    for (nome, stats), cor in zip(resultados.items(), cores):
+        if stats['latencia_ponta_a_ponta']:
+            plt.hist([t * 1000 for t in stats['latencia_ponta_a_ponta']], bins=30, alpha=0.5, label=nome, color=cor, edgecolor='black')
+        
+    plt.title('Comparativo: Distribuição da Latência Ponta-a-Ponta')
+    plt.xlabel('Tempo (ms)')
+    plt.ylabel('Frequência')
+    plt.legend()
+
+    plt.tight_layout()
+    print("\n[AVISO] Os gráficos comparativos foram abertos em uma nova janela.")
+    print(">>> FECHE A JANELA DO GRÁFICO PARA LIBERAR O MENU E CONTINUAR <<<")
+    plt.show()
+
+def executar_simulacao_comparativa():
+    """Roda a simulação 3 vezes sequencialmente e compila os resultados visuais."""
+    print("\n" + "="*45)
+    print(" INICIANDO RODADA COMPARATIVA AUTOMÁTICA ")
+    print("="*45)
+    
+    bandas = {
+        'Baixa (100 Kbps)': 100e3,
+        'Média (1 Mbps)': 1e6,
+        'Alta (10 Mbps)': 10e6
+    }
+    resultados_stats = {}
+    
+    for nome, banda in bandas.items():
+        print(f"\n[Simulando Perfil: {nome}]")
+        CONFIG['LARGURA_BANDA'] = banda
+        CONFIG['MU_REDE'] = CONFIG['LARGURA_BANDA'] / CONFIG['TAMANHO_LOG_AVG']
+        
+        # Estruturas zeradas para esta rodada
+        stats = {
+            'logs_gerados': 0, 'logs_perda_buffer': 0, 'logs_armazenados': 0,
+            'consultas_geradas': 0, 'consultas_completas': 0,
+            'latencia_rede': [], 'latencia_ponta_a_ponta': [], 'latencia_recuperacao': [],
+            'ocupacao_sistema': [], 'utilizacao_canal': [], 'amostras_tempo': []
+        }
+        estado_rede = {'sinal_ativo': True, 'backlog': 0}
+        
+        env = simpy.Environment()
+        canal_rf = simpy.Resource(env, capacity=1)
+        servidor_cpu = simpy.Resource(env, capacity=CONFIG['CAPACIDADE_CPU'])
+        armazenamento_disco = simpy.Resource(env, capacity=CONFIG['CAPACIDADE_DISCO'])
+
+        env.process(gerador_trafego_iot(env, canal_rf, servidor_cpu, armazenamento_disco, stats, estado_rede))
+        env.process(fluxo_recuperacao_usuario(env, servidor_cpu, armazenamento_disco, stats))
+        env.process(monitorar_sistema(env, canal_rf, stats))
+        
+        env.run(until=CONFIG['TEMPO_SIMULACAO']) 
+        
+        resultados_stats[nome] = stats
+        
+        # Micro relatório rápido
+        latencia = np.mean(stats['latencia_ponta_a_ponta']) * 1000 if stats['latencia_ponta_a_ponta'] else 0
+        prob_bloqueio = (stats['logs_perda_buffer'] / stats['logs_gerados']) * 100 if stats['logs_gerados'] > 0 else 0
+        print(f" > Descartes: {stats['logs_perda_buffer']} ({prob_bloqueio:.1f}%) | Latência Média: {latencia:.2f} ms")
+
+    # Reseta pra não contaminar próximas execuções via menu
+    CONFIG['LARGURA_BANDA'] = 1e6
+    CONFIG['MU_REDE'] = CONFIG['LARGURA_BANDA'] / CONFIG['TAMANHO_LOG_AVG']
+    
+    plotar_graficos_comparativos(resultados_stats)
+
 def main():
     """Menu principal do programa."""
     while True:
@@ -247,7 +330,6 @@ def main():
             print("Encerrando o simulador")
             break
         elif escolha in ['1', '2']:
-            # Reseta para o padrão caso venha do cenário 3
             CONFIG['LARGURA_BANDA'] = 1e6
             CONFIG['MU_REDE'] = CONFIG['LARGURA_BANDA'] / CONFIG['TAMANHO_LOG_AVG']
             executar_simulacao(escolha)
@@ -256,8 +338,13 @@ def main():
             print("1 - Baixa (100 Kbps - Possível gargalo)")
             print("2 - Média (1 Mbps - Padrão)")
             print("3 - Alta  (10 Mbps - Rede folgada)")
-            bw_escolha = input("Digite a opção (1, 2 ou 3): ").strip()
+            print("4 - Rodada Comparativa Automática (Sobrepor gráficos 1, 2 e 3)")
+            bw_escolha = input("Digite a opção (1, 2, 3 ou 4): ").strip()
             
+            if bw_escolha == '4':
+                executar_simulacao_comparativa()
+                continue
+                
             if bw_escolha == '1':
                 CONFIG['LARGURA_BANDA'] = 100e3
             elif bw_escolha == '3':
@@ -265,7 +352,6 @@ def main():
             else:
                 CONFIG['LARGURA_BANDA'] = 1e6 # Default (Media)
                 
-            # Recalcula a taxa de serviço da rede (Mu)
             CONFIG['MU_REDE'] = CONFIG['LARGURA_BANDA'] / CONFIG['TAMANHO_LOG_AVG']
             executar_simulacao('3')
         else:
