@@ -1,20 +1,32 @@
-# Cenário 4: Simulação de Instabilidade de Rede (Jitter)
+# Documentação de Simulação: Cenário 4 - Instabilidade de Rede (Jitter)
 
-## 1. O que é Jitter?
-O **Jitter** é a variação estatística do atraso (latência) na entrega de pacotes sucessivos dentro de uma rede. Em um cenário ideal, os pacotes chegariam com um intervalo constante; no mundo real, fatores como congestionamento dinâmico, interferências em meios compartilhados (como RF/Wi-Fi) e variações no processamento de roteadores causam essa oscilação imprevisível.
+## 1. Descrição do Cenário
+Este cenário simula o comportamento de um sistema IoT onde dispositivos (*smartwatches*) enviam logs para um servidor central sob condições de rede instáveis. O foco é o **Jitter**, definido como a variação estatística do atraso na entrega de pacotes (**Packet Delay Variation - PDV**).
 
-## 2. Objetivo do Cenário
-Este cenário visa avaliar a resiliência do sistema IoT diante de uma rede instável. Diferente do Cenário 2 (queda total), aqui a rede permanece ativa, mas a **previsibilidade** do tempo de resposta é degradada. O objetivo é observar como a incerteza no tempo de chegada dos logs afeta a ocupação do buffer e a latência final.
+Diferente de um atraso fixo, o Jitter faz com que logs enviados em intervalos regulares cheguem ao servidor em "rajadas" ou com espaçamentos excessivos, testando a resiliência da fila do gateway.
 
-## 3. Como a Simulação Ocorre
-A lógica de transmissão foi modificada especificamente para este fluxo:
-* **Cálculo de Atraso Composto:** O tempo de rede deixa de ser uma distribuição exponencial pura e passa a ser a soma de dois componentes:
-    1.  **Atraso Base:** Segue a distribuição exponencial $M/M/1$ padrão da largura de banda.
-    2.  **Componente Jitter:** Uma variável aleatória uniforme definida pelo parâmetro `JITTER_MAX`.
-* **Fórmula Aplicada:** $$Atraso_{total} = Atraso_{base} + \text{Uniforme}(0, \text{JITTER\_MAX})$$
-* **Impacto no Fluxo:** Cada log sofre um atraso variável antes de chegar à CPU, simulando a instabilidade típica de canais de rádio frequência.
+## 2. Parâmetros de Configuração
+* **Taxa de Geração (λ):** 60 logs/segundo.
+* **Capacidade do Buffer (K):** 50 logs.
+* **Bit Error Rate (BER):** 1e-5 (gerando retransmissões).
+* **Jitter Máximo (JITTER_MAX):** 0.05s (modelado via Distribuição Gaussiana).
+* **Tempo de Simulação:** 1000 segundos.
 
-## 4. Importância deste Cenário
-* **Análise de Dispersão:** Permite observar o "alargamento" da base no histograma de latência, indicando perda de determinismo.
-* **Dimensionamento de Buffer:** Ajuda a verificar se a capacidade da fila ($K=50$) é suficiente para absorver pequenos surtos de chegada causados pelo represamento momentâneo de pacotes.
-* **Qualidade de Serviço (QoS):** É fundamental para validar se os requisitos de tempo do projeto IoT são atendidos mesmo sob condições de rede não ideais, o que é crítico para aplicações de monitoramento em tempo real.
+---
+
+## 3. Análise de Resultados
+
+![Gráfico de Ocupação e Histograma de Latência - Cenário 4](result_cenario_04.png)
+*Figura 1: Comportamento do Gateway e distribuição de atrasos sob efeito de Jitter.*
+
+A execução do cenário apresentou os seguintes comportamentos críticos:
+
+* **Distribuição de Latência (Assinatura do Jitter):** O histograma revelou uma **cauda longa à direita**. Enquanto a latência base situa-se em torno de 30ms, a instabilidade da rede causou dispersões frequentes, elevando o desvio padrão (Jitter Real) para a faixa de **28ms**. Isso confirma que a entrega de dados não é constante.
+* **Picos de Ocupação Aleatórios:** No gráfico de ocupação, observamos picos súbitos de logs no sistema. Como a taxa de saída do rádio é limitada, esses picos são causados puramente pelo "encavalamento" de pacotes que sofreram diferentes atrasos na rede e chegaram quase simultaneamente ao servidor.
+* **Eficiência do Buffer:** Apesar da instabilidade, a ocupação máxima permaneceu abaixo da capacidade crítica (50 logs). O sistema demonstrou robustez, mas o Jitter aumentou drasticamente a imprevisibilidade do tempo de resposta ponta-a-ponta.
+* **Impacto das Retransmissões:** A combinação de erros de bit (BER) com Jitter criou gargalos momentâneos. Logs retransmitidos somam-se à variabilidade natural da rede, aumentando o estresse sobre a fila de entrada do backend.
+
+---
+
+## 4. Conclusão
+O cenário de Jitter prova que, em sistemas IoT reais, não basta dimensionar o servidor pela média de tráfego. É necessário prever buffers que suportem a chegada irregular de dados para evitar descartes durante oscilações de latência da rede sem fio, garantindo a integridade dos logs coletados pelos dispositivos.

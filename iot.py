@@ -15,13 +15,18 @@ CONFIG = {
     'LARGURA_BANDA': 1e6,        # bps
     'TAMANHO_LOG_AVG': 1024 * 8, # bits
     'CAPACIDADE_BUFFER': 50,     # Capacidade da Fila (K)
+    'CAPACIDADE_BACKLOG': 500,   # Memória RAM/Flash limitada dos dispositivos IoT
     'CAPACIDADE_CPU': 1,
     'CAPACIDADE_DISCO': 1,
     'TEMPO_PROC_AVG': 0.005,
     'TEMPO_PROC_QUERY_AVG': 0.002,
     'TEMPO_DISCO_AVG': 0.005,
     'TEMPO_BUSCA_AVG': 0.010,
-    'JITTER_MAX': 0.05
+    'BER': 1e-5,                 # Bit Error Rate (Probabilidade de erro por bit)
+    'TENTATIVAS': 3,            # Máximo de retransmissões antes de descartar
+    'JITTER_FACTOR': 0.15,       # Flutuação de 15% na capacidade do canal
+    'JITTER_MAX': 0.05,
+    'JANELA_RECONEXAO': 5.0,     # Janela maior para reduzir colisão na volta
 }
 
 CONFIG['MU_REDE'] = CONFIG['LARGURA_BANDA'] / CONFIG['TAMANHO_LOG_AVG']
@@ -39,11 +44,38 @@ def fluxo_completo_log(env, nome, canal_rf, cpu, disco, stats):
     if (len(canal_rf.queue) + canal_rf.count) >= CONFIG['CAPACIDADE_BUFFER']: 
         stats['logs_perda_buffer'] += 1
         return
+    
+    # --- Lógica de Transmissão com BER e Retentativas ---
+    sucesso = False
+    tentativas = 0
+    
+    while tentativas <= CONFIG['TENTATIVAS']:
+        with canal_rf.request() as req_rede:
+            yield req_rede
+            
+            # Aplica Jitter: O tempo de serviço base flutua conforme a qualidade do canal
+            tempo_base = random.expovariate(CONFIG['MU_REDE'])
+            jitter_mult = random.uniform(1 - CONFIG['JITTER_FACTOR'], 1 + CONFIG['JITTER_FACTOR'])
+            yield env.timeout(tempo_base * jitter_mult)
+            
+            # PER (Packet Error Rate) = 1 - (1 - BER)^bits
+            prob_erro_pacote = 1 - (1 - CONFIG['BER'])**CONFIG['TAMANHO_LOG_AVG']
+            if random.random() > prob_erro_pacote:
+                sucesso = True
+                break
+            else:
+                tentativas += 1
+                stats['logs_retransmissoes'] += 1
 
-    with canal_rf.request() as req_rede:
-        yield req_rede
-        yield env.timeout(random.expovariate(CONFIG['MU_REDE']))
-        stats['latencia_rede'].append(env.now - chegada_sistema)
+    if sucesso:
+        latencia_atual = env.now - chegada_sistema
+        if stats['latencia_rede']:
+            # Calcula o Jitter (Packet Delay Variation) comparando com o pacote anterior
+            stats['jitter_rede'].append(abs(latencia_atual - stats['latencia_rede'][-1]))
+        stats['latencia_rede'].append(latencia_atual)
+    else:
+        stats['logs_falha_transmissao'] += 1
+        return
 
     with cpu.request() as req_cpu:
         yield req_cpu
@@ -54,10 +86,12 @@ def fluxo_completo_log(env, nome, canal_rf, cpu, disco, stats):
         yield env.timeout(random.expovariate(1.0 / CONFIG['TEMPO_DISCO_AVG']))
         
     stats['logs_armazenados'] += 1
+
     stats['latencia_ponta_a_ponta'].append(env.now - chegada_sistema)
 
+
 def fluxo_com_jitter(env, nome, canal_rf, cpu, disco, stats):
-    """CENÁRIO 4: Simula o comportamento de Jitter."""
+    """CENÁRIO 4: Simula o comportamento de Jitter com BER e Retransmissões."""
     chegada_sistema = env.now
     stats['logs_gerados'] += 1
     
@@ -65,21 +99,48 @@ def fluxo_com_jitter(env, nome, canal_rf, cpu, disco, stats):
         stats['logs_perda_buffer'] += 1
         return
 
-    with canal_rf.request() as req_rede:
-        yield req_rede
-        # Tempo base + variação aleatória
-        tempo_base = random.expovariate(CONFIG['MU_REDE'])
-        jitter = random.uniform(0, CONFIG['JITTER_MAX']) 
-        
-        yield env.timeout(tempo_base + jitter)
-        stats['latencia_rede'].append(env.now - chegada_sistema)
+    sucesso = False
+    tentativas = 0
+    
+    while tentativas <= CONFIG['TENTATIVAS']:
+        with canal_rf.request() as req_rede:
+            yield req_rede
+            # Tempo de transmissão física (ocupa o canal)
+            tempo_transmissao = random.expovariate(CONFIG['MU_REDE'])
+            yield env.timeout(tempo_transmissao)
+            
+            # PER (Packet Error Rate)
+            prob_erro_pacote = 1 - (1 - CONFIG['BER'])**CONFIG['TAMANHO_LOG_AVG']
+            if random.random() > prob_erro_pacote:
+                sucesso = True
+                break
+            else:
+                tentativas += 1
+                stats['logs_retransmissoes'] += 1
 
+    if sucesso:
+        # --- APLICAÇÃO DO JITTER DE REDE (Propagação) ---
+        # Ocorre com o canal RF já liberado. Usamos Gaussiana para variância.
+        atraso_jitter = max(0, random.gauss(0, CONFIG['JITTER_MAX'] / 2))
+        yield env.timeout(atraso_jitter)
+
+        latencia_atual = env.now - chegada_sistema
+        if stats['latencia_rede']:
+            stats['jitter_rede'].append(abs(latencia_atual - stats['latencia_rede'][-1]))
+        stats['latencia_rede'].append(latencia_atual)
+    else:
+        stats['logs_falha_transmissao'] += 1
+        return
+
+    # Processamento no Servidor
     with cpu.request() as req_cpu:
         yield req_cpu
         yield env.timeout(random.expovariate(1.0 / CONFIG['TEMPO_PROC_AVG']))
+        
     with disco.request() as req_disco:
         yield req_disco
         yield env.timeout(random.expovariate(1.0 / CONFIG['TEMPO_DISCO_AVG']))
+        
     stats['logs_armazenados'] += 1
     stats['latencia_ponta_a_ponta'].append(env.now - chegada_sistema)
 
@@ -105,8 +166,7 @@ def executar_busca(env, cpu, disco, stats):
     stats['consultas_completas'] += 1
     stats['latencia_recuperacao'].append(env.now - inicio_busca)
 
-
-def gerador_trafego_iot(env, canal_rf, cpu, disco, stats, estado_rede, cenario):
+def gerador_trafego_iot(env, canal_rf, cpu, disco, stats, estado_rede, cenario = ''):
     """Gera a chegada de logs. Se a rede cair, acumula no backlog."""
     i = 0
     while True:
@@ -119,7 +179,11 @@ def gerador_trafego_iot(env, canal_rf, cpu, disco, stats, estado_rede, cenario):
             else:
                 env.process(fluxo_completo_log(env, f'Log_{i}', canal_rf, cpu, disco, stats))
         else:
-            estado_rede['backlog'] += 1
+            # Verifica se o dispositivo ainda tem memória para armazenar o log
+            if estado_rede['backlog'] < CONFIG['CAPACIDADE_BACKLOG']:
+                estado_rede['backlog'] += 1
+            else:
+                stats['logs_perda_memoria_dispositivo'] += 1
 
 def disparar_log_com_atraso(env, atraso, nome, canal_rf, cpu, disco, stats):
     """Função auxiliar: Espera um tempinho aleatório antes de tentar enviar o log."""
@@ -137,11 +201,9 @@ def evento_queda_sinal(env, canal_rf, cpu, disco, stats, estado_rede):
     print(f"[{env.now:.1f}s] ALERTA: Sinal restaurado! Enviando {estado_rede['backlog']} logs retidos...")
     estado_rede['sinal_ativo'] = True
     
-    # Aplica o JITTER: Espalha os pacotes aleatoriamente em uma janela de tempo
-    janela_espalhamento = 0.5 #Em segundos 
-    
+    # Aplica o Staggering Jitter: Evita o "thundering herd" no canal RF
     for i in range(estado_rede['backlog']):
-        atraso_aleatorio = random.uniform(0.0, janela_espalhamento)
+        atraso_aleatorio = random.uniform(0.0, CONFIG['JANELA_RECONEXAO'])
         env.process(disparar_log_com_atraso(
             env, atraso_aleatorio, f'Log_Backlog_{i}', canal_rf, cpu, disco, stats
         ))
@@ -166,18 +228,25 @@ def monitorar_sistema(env, canal_rf, stats):
 def imprimir_relatorio(stats):
     """Calcula e imprime as métricas finais."""
     prob_bloqueio = stats['logs_perda_buffer'] / stats['logs_gerados'] if stats['logs_gerados'] > 0 else 0
+    perda_dispositivo = stats['logs_perda_memoria_dispositivo'] / stats['logs_gerados'] if stats['logs_gerados'] > 0 else 0
     utilizacao_media = np.mean(stats['utilizacao_canal']) * 100
     l_medio = np.mean(stats['ocupacao_sistema'])
+    taxa_retransmissao = stats['logs_retransmissoes'] / stats['logs_gerados'] if stats['logs_gerados'] > 0 else 0
+    jitter_medio = np.mean(stats['jitter_rede']) * 1000 if stats['jitter_rede'] else 0
 
     print("\n" + "="*50)
     print(" RELATÓRIO FINAL DA SIMULAÇÃO ")
     print("="*50)
     print(f"Total de Logs Tentaram Entrar: {stats['logs_gerados']}")
+    print(f"Descartes por Memória do Dispositivo (Outage): {stats['logs_perda_memoria_dispositivo']} ({perda_dispositivo:.2%})")
     print(f"Descartes por Buffer Cheio: {stats['logs_perda_buffer']} (Prob. Bloqueio: {prob_bloqueio:.4f})")
+    print(f"Descartes por Erro de Transmissão (BER): {stats['logs_falha_transmissao']}")
+    print(f"Total de Retransmissões Realizadas: {stats['logs_retransmissoes']} (Média: {taxa_retransmissao:.2f}/log)")
     print(f"Utilização Média do Canal: {utilizacao_media:.2f}%")
     
     latencia_rede = np.mean(stats['latencia_rede']) * 1000 if stats['latencia_rede'] else 0
     print(f"Latência Média de Rede: {latencia_rede:.2f} ms")
+    print(f"Jitter Médio de Rede (PDV): {jitter_medio:.2f} ms")
     print(f"Número Médio de Logs no Sistema (L): {l_medio:.2f}")
 
     print(f"\n[BACKEND]")
@@ -187,15 +256,24 @@ def imprimir_relatorio(stats):
     print(f"Latência Média PONTA-A-PONTA: {latencia_end:.2f} ms")
 
 
-def plotar_graficos(stats):
+def plotar_graficos(stats, cenario):
     """Plota os resultados visuais da simulação."""
+    titulos = {
+        '1': 'Cenário 1: Operação Normal (Tráfego Contínuo)',
+        '2': 'Cenário 2: Falha de Sinal e Reconexão em Massa',
+        '3': 'Cenário 3: Largura de Banda Variável',
+        '4': 'Cenário 4: Instabilidade de Rede (Jitter)'
+    }
+
+    titulo_base = titulos.get(cenario, "Simulação IoT")
+
     plt.figure(figsize=(14, 10))
 
     # Gráfico 1: Ocupação do Buffer (Crucial para ver a reconexão em massa)
     plt.subplot(2, 1, 1)
     plt.plot(stats['amostras_tempo'], stats['ocupacao_sistema'], color='orange', linewidth=1)
     plt.axhline(y=CONFIG['CAPACIDADE_BUFFER'], color='r', linestyle='--', label='Capacidade Máxima (K)')
-    plt.title('Ocupação do Gateway ao Longo do Tempo (Note o pico na reconexão)')
+    plt.title(f'{titulo_base} - Ocupação do Gateway')
     plt.xlabel('Tempo de Simulação (s)')
     plt.ylabel('Logs no Sistema')
     plt.legend()
@@ -203,8 +281,9 @@ def plotar_graficos(stats):
     # Gráfico 2: Histograma de Latência
     plt.subplot(2, 1, 2)
     if stats['latencia_ponta_a_ponta']:
-        plt.hist([t * 1000 for t in stats['latencia_ponta_a_ponta']], bins=30, color='skyblue', edgecolor='black')
-        plt.title('Distribuição da Latência Ponta-a-Ponta')
+        desvio = np.std(stats['latencia_ponta_a_ponta']) * 1000
+        plt.hist([t * 1000 for t in stats['latencia_ponta_a_ponta']], bins=40, color='skyblue', edgecolor='black')
+        plt.title(f'Distribuição da Latência (Jitter Real/Std Dev: {desvio:.2f} ms)')
         plt.xlabel('Tempo (ms)')
         plt.ylabel('Frequência')
 
@@ -229,8 +308,10 @@ def executar_simulacao(cenario_escolhido):
     # Estruturas de Dados zeradas para cada nova execução
     stats = {
         'logs_gerados': 0, 'logs_perda_buffer': 0, 'logs_armazenados': 0,
+        'logs_perda_memoria_dispositivo': 0,
+        'logs_retransmissoes': 0, 'logs_falha_transmissao': 0,
         'consultas_geradas': 0, 'consultas_completas': 0,
-        'latencia_rede': [], 'latencia_ponta_a_ponta': [], 'latencia_recuperacao': [],
+        'latencia_rede': [], 'jitter_rede': [], 'latencia_ponta_a_ponta': [], 'latencia_recuperacao': [],
         'ocupacao_sistema': [], 'utilizacao_canal': [], 'amostras_tempo': []
     }
     
@@ -256,7 +337,7 @@ def executar_simulacao(cenario_escolhido):
     
     # Exibe resultados
     imprimir_relatorio(stats)
-    plotar_graficos(stats)
+    plotar_graficos(stats, cenario_escolhido)
 
 
 def plotar_graficos_comparativos(resultados):
@@ -312,8 +393,10 @@ def executar_simulacao_comparativa():
         # Estruturas zeradas para esta rodada
         stats = {
             'logs_gerados': 0, 'logs_perda_buffer': 0, 'logs_armazenados': 0,
+            'logs_perda_memoria_dispositivo': 0,
+            'logs_retransmissoes': 0, 'logs_falha_transmissao': 0,
             'consultas_geradas': 0, 'consultas_completas': 0,
-            'latencia_rede': [], 'latencia_ponta_a_ponta': [], 'latencia_recuperacao': [],
+            'latencia_rede': [], 'jitter_rede': [], 'latencia_ponta_a_ponta': [], 'latencia_recuperacao': [],
             'ocupacao_sistema': [], 'utilizacao_canal': [], 'amostras_tempo': []
         }
         estado_rede = {'sinal_ativo': True, 'backlog': 0}
@@ -323,7 +406,7 @@ def executar_simulacao_comparativa():
         servidor_cpu = simpy.Resource(env, capacity=CONFIG['CAPACIDADE_CPU'])
         armazenamento_disco = simpy.Resource(env, capacity=CONFIG['CAPACIDADE_DISCO'])
 
-        env.process(gerador_trafego_iot(env, canal_rf, servidor_cpu, armazenamento_disco, stats, estado_rede, cenario_escolhido))
+        env.process(gerador_trafego_iot(env, canal_rf, servidor_cpu, armazenamento_disco, stats, estado_rede))
         env.process(fluxo_recuperacao_usuario(env, servidor_cpu, armazenamento_disco, stats))
         env.process(monitorar_sistema(env, canal_rf, stats))
         
@@ -342,7 +425,6 @@ def executar_simulacao_comparativa():
     
     plotar_graficos_comparativos(resultados_stats)
 
-
 def main():
     """Menu principal do programa."""
     while True:
@@ -356,7 +438,7 @@ def main():
         print("4 - Cenário com Instabilidade de Rede (Jitter)")
         print("0 - Sair do Programa")
         
-        escolha = input("Digite a opção (0, 1, 2 ou 3): ").strip()
+        escolha = input("Digite a opção (0, 1, 2, 3 ou 4): ").strip()
         
         if escolha == '0':
             print("Encerrando o simulador")
