@@ -113,13 +113,13 @@ def gerador_trafego_iot(env, canal_rf, cpu, disco, stats, estado_rede, cenario):
         yield env.timeout(random.expovariate(CONFIG['LAMBDA_IOT']))
         i += 1
         
-    if estado_rede['sinal_ativo']:
-        if cenario == '4':
-            env.process(fluxo_com_jitter(env, f'Log_{i}', canal_rf, cpu, disco, stats))
+        if estado_rede['sinal_ativo']:
+            if cenario == '4':
+                env.process(fluxo_com_jitter(env, f'Log_{i}', canal_rf, cpu, disco, stats))
+            else:
+                env.process(fluxo_completo_log(env, f'Log_{i}', canal_rf, cpu, disco, stats))
         else:
-            env.process(fluxo_completo_log(env, f'Log_{i}', canal_rf, cpu, disco, stats))
-    else:
-        estado_rede['backlog'] += 1
+            estado_rede['backlog'] += 1
 
 def disparar_log_com_atraso(env, atraso, nome, canal_rf, cpu, disco, stats):
     """Função auxiliar: Espera um tempinho aleatório antes de tentar enviar o log."""
