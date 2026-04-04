@@ -21,6 +21,7 @@ CONFIG = {
     'TEMPO_PROC_QUERY_AVG': 0.002,
     'TEMPO_DISCO_AVG': 0.005,
     'TEMPO_BUSCA_AVG': 0.010,
+    'JITTER_MAX': 0.05
 }
 
 CONFIG['MU_REDE'] = CONFIG['LARGURA_BANDA'] / CONFIG['TAMANHO_LOG_AVG']
@@ -55,6 +56,32 @@ def fluxo_completo_log(env, nome, canal_rf, cpu, disco, stats):
     stats['logs_armazenados'] += 1
     stats['latencia_ponta_a_ponta'].append(env.now - chegada_sistema)
 
+def fluxo_com_jitter(env, nome, canal_rf, cpu, disco, stats):
+    """CENÁRIO 4: Simula o comportamento de Jitter."""
+    chegada_sistema = env.now
+    stats['logs_gerados'] += 1
+    
+    if (len(canal_rf.queue) + canal_rf.count) >= CONFIG['CAPACIDADE_BUFFER']: 
+        stats['logs_perda_buffer'] += 1
+        return
+
+    with canal_rf.request() as req_rede:
+        yield req_rede
+        # Tempo base + variação aleatória
+        tempo_base = random.expovariate(CONFIG['MU_REDE'])
+        jitter = random.uniform(0, CONFIG['JITTER_MAX']) 
+        
+        yield env.timeout(tempo_base + jitter)
+        stats['latencia_rede'].append(env.now - chegada_sistema)
+
+    with cpu.request() as req_cpu:
+        yield req_cpu
+        yield env.timeout(random.expovariate(1.0 / CONFIG['TEMPO_PROC_AVG']))
+    with disco.request() as req_disco:
+        yield req_disco
+        yield env.timeout(random.expovariate(1.0 / CONFIG['TEMPO_DISCO_AVG']))
+    stats['logs_armazenados'] += 1
+    stats['latencia_ponta_a_ponta'].append(env.now - chegada_sistema)
 
 def fluxo_recuperacao_usuario(env, cpu, disco, stats):
     """Gera requisições de usuários externos."""
@@ -79,17 +106,20 @@ def executar_busca(env, cpu, disco, stats):
     stats['latencia_recuperacao'].append(env.now - inicio_busca)
 
 
-def gerador_trafego_iot(env, canal_rf, cpu, disco, stats, estado_rede):
+def gerador_trafego_iot(env, canal_rf, cpu, disco, stats, estado_rede, cenario):
     """Gera a chegada de logs. Se a rede cair, acumula no backlog."""
     i = 0
     while True:
         yield env.timeout(random.expovariate(CONFIG['LAMBDA_IOT']))
         i += 1
         
-        if estado_rede['sinal_ativo']:
-            env.process(fluxo_completo_log(env, f'Log_{i}', canal_rf, cpu, disco, stats))
+    if estado_rede['sinal_ativo']:
+        if cenario == '4':
+            env.process(fluxo_com_jitter(env, f'Log_{i}', canal_rf, cpu, disco, stats))
         else:
-            estado_rede['backlog'] += 1 # Dispositivo guarda localmente sem enviar
+            env.process(fluxo_completo_log(env, f'Log_{i}', canal_rf, cpu, disco, stats))
+    else:
+        estado_rede['backlog'] += 1
 
 def disparar_log_com_atraso(env, atraso, nome, canal_rf, cpu, disco, stats):
     """Função auxiliar: Espera um tempinho aleatório antes de tentar enviar o log."""
@@ -213,7 +243,7 @@ def executar_simulacao(cenario_escolhido):
     armazenamento_disco = simpy.Resource(env, capacity=CONFIG['CAPACIDADE_DISCO'])
 
     # Processos Padrões
-    env.process(gerador_trafego_iot(env, canal_rf, servidor_cpu, armazenamento_disco, stats, estado_rede))
+    env.process(gerador_trafego_iot(env, canal_rf, servidor_cpu, armazenamento_disco, stats, estado_rede, cenario_escolhido))
     env.process(fluxo_recuperacao_usuario(env, servidor_cpu, armazenamento_disco, stats))
     env.process(monitorar_sistema(env, canal_rf, stats))
 
@@ -293,7 +323,7 @@ def executar_simulacao_comparativa():
         servidor_cpu = simpy.Resource(env, capacity=CONFIG['CAPACIDADE_CPU'])
         armazenamento_disco = simpy.Resource(env, capacity=CONFIG['CAPACIDADE_DISCO'])
 
-        env.process(gerador_trafego_iot(env, canal_rf, servidor_cpu, armazenamento_disco, stats, estado_rede))
+        env.process(gerador_trafego_iot(env, canal_rf, servidor_cpu, armazenamento_disco, stats, estado_rede, cenario_escolhido))
         env.process(fluxo_recuperacao_usuario(env, servidor_cpu, armazenamento_disco, stats))
         env.process(monitorar_sistema(env, canal_rf, stats))
         
@@ -312,6 +342,7 @@ def executar_simulacao_comparativa():
     
     plotar_graficos_comparativos(resultados_stats)
 
+
 def main():
     """Menu principal do programa."""
     while True:
@@ -322,6 +353,7 @@ def main():
         print("1 - Cenário Normal (Tráfego Contínuo)")
         print("2 - Cenário de Falha (Queda de Sinal e Reconexão em Massa)")
         print("3 - Cenário com Largura de Banda Variável (Baixa, Média, Alta)")
+        print("4 - Cenário com Instabilidade de Rede (Jitter)")
         print("0 - Sair do Programa")
         
         escolha = input("Digite a opção (0, 1, 2 ou 3): ").strip()
@@ -329,7 +361,7 @@ def main():
         if escolha == '0':
             print("Encerrando o simulador")
             break
-        elif escolha in ['1', '2']:
+        elif escolha in ['1', '2', '4']:
             CONFIG['LARGURA_BANDA'] = 1e6
             CONFIG['MU_REDE'] = CONFIG['LARGURA_BANDA'] / CONFIG['TAMANHO_LOG_AVG']
             executar_simulacao(escolha)
