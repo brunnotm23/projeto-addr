@@ -26,10 +26,10 @@ CONFIG = {
     'BACKOFF_BASE': 0.010,       # Tempo de espera base após falha de transmissão
     'TEMPO_DISCO_AVG': 0.003,
     'TEMPO_BUSCA_AVG': 0.010,
-    'BER': 1e-7,                 # Bit Error Rate (Probabilidade de erro por bit)
+    'BER': 1e-6,                 # Bit Error Rate (Probabilidade de erro por bit)
     'TENTATIVAS': 2,            # Máximo de retransmissões antes de descartar
     'JITTER_FACTOR': 0.05,       # Flutuação de 15% na capacidade do canal
-    'JITTER_MAX': 0.5,          # Jitter para o cenário 4
+    'JITTER_MAX': 0.15,          # Jitter para o cenário 4
     'JANELA_RECONEXAO': 5.0,     # Janela maior para reduzir colisão na volta
     'BANDA_VARIAVEL_STEP': 50    # Frequência de alteração de banda para o cenário 3
 }
