@@ -11,14 +11,14 @@ import matplotlib.pyplot as plt
 N_DISPOSITIVOS = 10000
 
 CONFIG = {
-    'LAMBDA_IOT': N_DEVICES * 0.01,          # Taxa de chegada agregada
+    'LAMBDA_IOT': N_DISPOSITIVOS * 0.01,          # Taxa de chegada agregada
     'LAMBDA_CONSULTA': 10,     # Consultas de usuários (consultas/s)
     'TEMPO_SIMULACAO': 3000,     # Tempo total (segundos)
     'INTERVALO_MONITOR': 0.1,    # Frequência do monitoramento
     'LARGURA_BANDA': 1e6,        # bps
     'TAMANHO_LOG_AVG': 1024 * 8, # bits
     'CAPACIDADE_BUFFER': 50,     # Capacidade da Fila (K)
-    'CAPACIDADE_BACKLOG': N_DEVICES * 60,   # Memória total do cluster (ex: 10 logs por dispositivo)
+    'CAPACIDADE_BACKLOG': N_DISPOSITIVOS * 60,   # Memória total do cluster (ex: 10 logs por dispositivo)
     'CAPACIDADE_CPU': 1,
     'CAPACIDADE_DISCO': 1,
     'TEMPO_PROC_AVG': 0.002,
