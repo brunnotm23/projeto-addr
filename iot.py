@@ -13,12 +13,12 @@ N_DEVICES = 10000
 CONFIG = {
     'LAMBDA_IOT': N_DEVICES * 0.01,          # Taxa de chegada agregada
     'LAMBDA_CONSULTA': 10,     # Consultas de usuários (consultas/s)
-    'TEMPO_SIMULACAO': 1000,     # Tempo total (segundos)
+    'TEMPO_SIMULACAO': 3000,     # Tempo total (segundos)
     'INTERVALO_MONITOR': 0.1,    # Frequência do monitoramento
     'LARGURA_BANDA': 1e6,        # bps
     'TAMANHO_LOG_AVG': 1024 * 8, # bits
     'CAPACIDADE_BUFFER': 50,     # Capacidade da Fila (K)
-    'CAPACIDADE_BACKLOG': N_DEVICES * 10,   # Memória total do cluster (ex: 10 logs por dispositivo)
+    'CAPACIDADE_BACKLOG': N_DEVICES * 60,   # Memória total do cluster (ex: 10 logs por dispositivo)
     'CAPACIDADE_CPU': 1,
     'CAPACIDADE_DISCO': 1,
     'TEMPO_PROC_AVG': 0.002,
@@ -208,11 +208,11 @@ def disparar_log_com_atraso(env, atraso, nome, canal_rf, cpu, disco, stats):
 
 def evento_queda_sinal(env, canal_rf, cpu, disco, stats, estado_rede):
     """Cenário 2: Simula uma queda de rede e a reconexão com Jitter (espalhamento)."""
-    yield env.timeout(300)
+    yield env.timeout(CONFIG['TEMPO_SIMULACAO']/3)
     print(f"\n[{env.now:.1f}s] ALERTA: Sinal de RF caiu! Dispositivos acumulando logs...")
     estado_rede['sinal_ativo'] = False
     
-    yield env.timeout(100)
+    yield env.timeout(CONFIG['TEMPO_SIMULACAO']/4)
     print(f"[{env.now:.1f}s] ALERTA: Sinal restaurado! Enviando {estado_rede['backlog']} logs retidos...")
     estado_rede['sinal_ativo'] = True
     
