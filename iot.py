@@ -284,7 +284,6 @@ def plotar_graficos(stats, cenario):
     # Gráfico 2: Histograma de Latência
     plt.subplot(2, 1, 2)
     if stats['latencia_ponta_a_ponta']:
-        
         plt.hist([t * 1000 for t in stats['latencia_ponta_a_ponta']], bins=40, color='skyblue', edgecolor='black')
         plt.title(f'{titulo_base} - Latência E2E')
         plt.xlabel('Tempo (ms)')
@@ -322,7 +321,7 @@ def executar_simulacao(cenario_escolhido):
         'ocupacao_sistema': [], 'utilizacao_canal': [], 'amostras_tempo': []
     }
     
-    estado_rede = {'sinal_ativo': True, 'backlog_timestamps': []}
+    estado_rede = {'sinal_ativo': True, 'backlog': 0}
     
     # Inicializa o SimPy
     env = simpy.Environment()
@@ -412,7 +411,7 @@ def executar_simulacao_comparativa():
             'latencia_rede': [], 'jitter_rede': [], 'latencia_ponta_a_ponta': [], 'latencia_recuperacao': [],
             'ocupacao_sistema': [], 'utilizacao_canal': [], 'amostras_tempo': []
         }
-        estado_rede = {'sinal_ativo': True, 'backlog_timestamps': []}
+        estado_rede = {'sinal_ativo': True, 'backlog': 0}
         
         env = simpy.Environment()
         canal_rf = simpy.Resource(env, capacity=1)
