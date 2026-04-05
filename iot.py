@@ -8,25 +8,24 @@ import matplotlib.pyplot as plt
 # =======================================================================
 
 CONFIG = {
-    'LAMBDA_IOT': 60.0,          # Taxa de chegada normal (logs/s)
+    'LAMBDA_IOT': 40.0,          # Taxa de chegada normal (logs/s)
     'LAMBDA_CONSULTA': 10.0,     # Consultas de usuários (consultas/s)
     'TEMPO_SIMULACAO': 1000,     # Tempo total (segundos)
     'INTERVALO_MONITOR': 0.1,    # Frequência do monitoramento
     'LARGURA_BANDA': 1e6,        # bps
     'TAMANHO_LOG_AVG': 1024 * 8, # bits
     'CAPACIDADE_BUFFER': 50,     # Capacidade da Fila (K)
-    'CAPACIDADE_BACKLOG': 500,   # Memória RAM/Flash limitada dos dispositivos IoT
-    'CAPACIDADE_BACKLOG': 500,   # Memória RAM/Flash limitada dos dispositivos IoT
+    'CAPACIDADE_BACKLOG': 1000,   # Memória RAM/Flash limitada dos dispositivos IoT
     'CAPACIDADE_CPU': 1,
     'CAPACIDADE_DISCO': 1,
-    'TEMPO_PROC_AVG': 0.005,
+    'TEMPO_PROC_AVG': 0.002,
     'TEMPO_PROC_QUERY_AVG': 0.002,
-    'TEMPO_DISCO_AVG': 0.005,
+    'TEMPO_DISCO_AVG': 0.003,
     'TEMPO_BUSCA_AVG': 0.010,
-    'BER': 1e-5,                 # Bit Error Rate (Probabilidade de erro por bit)
-    'TENTATIVAS': 3,            # Máximo de retransmissões antes de descartar
-    'JITTER_FACTOR': 0.15,       # Flutuação de 15% na capacidade do canal
-    'JITTER_MAX': 0.05,
+    'BER': 1e-7,                 # Bit Error Rate (Probabilidade de erro por bit)
+    'TENTATIVAS': 5,            # Máximo de retransmissões antes de descartar
+    'JITTER_FACTOR': 0.05,       # Flutuação de 15% na capacidade do canal
+    'JITTER_MAX': 0.05,          # Jitter para o cenário 4
     'JANELA_RECONEXAO': 5.0,     # Janela maior para reduzir colisão na volta
 }
 
@@ -186,11 +185,6 @@ def gerador_trafego_iot(env, canal_rf, cpu, disco, stats, estado_rede, cenario =
                 estado_rede['backlog'] += 1
             else:
                 stats['logs_perda_memoria_dispositivo'] += 1
-            # Verifica se o dispositivo ainda tem memória para armazenar o log
-            if estado_rede['backlog'] < CONFIG['CAPACIDADE_BACKLOG']:
-                estado_rede['backlog'] += 1
-            else:
-                stats['logs_perda_memoria_dispositivo'] += 1
 
 def disparar_log_com_atraso(env, atraso, nome, canal_rf, cpu, disco, stats):
     """Função auxiliar: Espera um tempinho aleatório antes de tentar enviar o log."""
@@ -209,9 +203,7 @@ def evento_queda_sinal(env, canal_rf, cpu, disco, stats, estado_rede):
     estado_rede['sinal_ativo'] = True
     
     # Aplica o Staggering Jitter: Evita o "thundering herd" no canal RF
-    # Aplica o Staggering Jitter: Evita o "thundering herd" no canal RF
     for i in range(estado_rede['backlog']):
-        atraso_aleatorio = random.uniform(0.0, CONFIG['JANELA_RECONEXAO'])
         atraso_aleatorio = random.uniform(0.0, CONFIG['JANELA_RECONEXAO'])
         env.process(disparar_log_com_atraso(
             env, atraso_aleatorio, f'Log_Backlog_{i}', canal_rf, cpu, disco, stats
@@ -238,11 +230,8 @@ def imprimir_relatorio(stats):
     """Calcula e imprime as métricas finais."""
     prob_bloqueio = stats['logs_perda_buffer'] / stats['logs_gerados'] if stats['logs_gerados'] > 0 else 0
     perda_dispositivo = stats['logs_perda_memoria_dispositivo'] / stats['logs_gerados'] if stats['logs_gerados'] > 0 else 0
-    perda_dispositivo = stats['logs_perda_memoria_dispositivo'] / stats['logs_gerados'] if stats['logs_gerados'] > 0 else 0
     utilizacao_media = np.mean(stats['utilizacao_canal']) * 100
     l_medio = np.mean(stats['ocupacao_sistema'])
-    taxa_retransmissao = stats['logs_retransmissoes'] / stats['logs_gerados'] if stats['logs_gerados'] > 0 else 0
-    jitter_medio = np.mean(stats['jitter_rede']) * 1000 if stats['jitter_rede'] else 0
     taxa_retransmissao = stats['logs_retransmissoes'] / stats['logs_gerados'] if stats['logs_gerados'] > 0 else 0
     jitter_medio = np.mean(stats['jitter_rede']) * 1000 if stats['jitter_rede'] else 0
 
@@ -251,10 +240,7 @@ def imprimir_relatorio(stats):
     print("="*50)
     print(f"Total de Logs Tentaram Entrar: {stats['logs_gerados']}")
     print(f"Descartes por Memória do Dispositivo (Outage): {stats['logs_perda_memoria_dispositivo']} ({perda_dispositivo:.2%})")
-    print(f"Descartes por Memória do Dispositivo (Outage): {stats['logs_perda_memoria_dispositivo']} ({perda_dispositivo:.2%})")
     print(f"Descartes por Buffer Cheio: {stats['logs_perda_buffer']} (Prob. Bloqueio: {prob_bloqueio:.4f})")
-    print(f"Descartes por Erro de Transmissão (BER): {stats['logs_falha_transmissao']}")
-    print(f"Total de Retransmissões Realizadas: {stats['logs_retransmissoes']} (Média: {taxa_retransmissao:.2f}/log)")
     print(f"Descartes por Erro de Transmissão (BER): {stats['logs_falha_transmissao']}")
     print(f"Total de Retransmissões Realizadas: {stats['logs_retransmissoes']} (Média: {taxa_retransmissao:.2f}/log)")
     print(f"Utilização Média do Canal: {utilizacao_media:.2f}%")
@@ -262,14 +248,15 @@ def imprimir_relatorio(stats):
     latencia_rede = np.mean(stats['latencia_rede']) * 1000 if stats['latencia_rede'] else 0
     print(f"Latência Média de Rede: {latencia_rede:.2f} ms")
     print(f"Jitter Médio de Rede (PDV): {jitter_medio:.2f} ms")
-    print(f"Jitter Médio de Rede (PDV): {jitter_medio:.2f} ms")
     print(f"Número Médio de Logs no Sistema (L): {l_medio:.2f}")
 
     print(f"\n[BACKEND]")
     print(f"Logs Salvos com Sucesso: {stats['logs_armazenados']}")
     
     latencia_end = np.mean(stats['latencia_ponta_a_ponta']) * 1000 if stats['latencia_ponta_a_ponta'] else 0
-    print(f"Latência Média PONTA-A-PONTA: {latencia_end:.2f} ms")
+    desvio = np.std(stats['latencia_ponta_a_ponta']) * 1000 if stats['latencia_ponta_a_ponta'] else 0
+    print(f"Desvio Latência E2E: {desvio:.2f} ms")
+    print(f"Latência Média E2E: {latencia_end:.2f} ms")
 
 
 def plotar_graficos(stats, cenario):
@@ -297,9 +284,9 @@ def plotar_graficos(stats, cenario):
     # Gráfico 2: Histograma de Latência
     plt.subplot(2, 1, 2)
     if stats['latencia_ponta_a_ponta']:
-        desvio = np.std(stats['latencia_ponta_a_ponta']) * 1000
+        
         plt.hist([t * 1000 for t in stats['latencia_ponta_a_ponta']], bins=40, color='skyblue', edgecolor='black')
-        plt.title(f'Distribuição da Latência (Jitter Real/Std Dev: {desvio:.2f} ms)')
+        plt.title(f'{titulo_base} - Latência E2E')
         plt.xlabel('Tempo (ms)')
         plt.ylabel('Frequência')
 
@@ -329,12 +316,13 @@ def executar_simulacao(cenario_escolhido):
         'logs_perda_memoria_dispositivo': 0,
         'logs_retransmissoes': 0, 'logs_falha_transmissao': 0,
         'consultas_geradas': 0, 'consultas_completas': 0,
-        'latencia_rede': [], 'jitter_rede': [], 'latencia_ponta_a_ponta': [], 'latencia_recuperacao': [],
+        'logs_perda_memoria_dispositivo': 0, 'logs_retransmissoes': 0, 
+        'logs_falha_transmissao': 0, 'consultas_geradas': 0, 'consultas_completas': 0,
         'latencia_rede': [], 'jitter_rede': [], 'latencia_ponta_a_ponta': [], 'latencia_recuperacao': [],
         'ocupacao_sistema': [], 'utilizacao_canal': [], 'amostras_tempo': []
     }
     
-    estado_rede = {'sinal_ativo': True, 'backlog': 0}
+    estado_rede = {'sinal_ativo': True, 'backlog_timestamps': []}
     
     # Inicializa o SimPy
     env = simpy.Environment()
@@ -380,6 +368,7 @@ def plotar_graficos_comparativos(resultados):
     for (nome, stats), cor in zip(resultados.items(), cores):
         if stats['latencia_ponta_a_ponta']:
             plt.hist([t * 1000 for t in stats['latencia_ponta_a_ponta']], bins=30, alpha=0.5, label=nome, color=cor, edgecolor='black')
+            plt.xscale('log')
         
     plt.title('Comparativo: Distribuição da Latência Ponta-a-Ponta')
     plt.xlabel('Tempo (ms)')
@@ -417,11 +406,13 @@ def executar_simulacao_comparativa():
             'logs_perda_memoria_dispositivo': 0,
             'logs_retransmissoes': 0, 'logs_falha_transmissao': 0,
             'consultas_geradas': 0, 'consultas_completas': 0,
+            'logs_perda_memoria_dispositivo': 0, 'logs_retransmissoes': 0, 
+            'logs_falha_transmissao': 0, 'consultas_geradas': 0, 'consultas_completas': 0,
             'latencia_rede': [], 'jitter_rede': [], 'latencia_ponta_a_ponta': [], 'latencia_recuperacao': [],
             'latencia_rede': [], 'jitter_rede': [], 'latencia_ponta_a_ponta': [], 'latencia_recuperacao': [],
             'ocupacao_sistema': [], 'utilizacao_canal': [], 'amostras_tempo': []
         }
-        estado_rede = {'sinal_ativo': True, 'backlog': 0}
+        estado_rede = {'sinal_ativo': True, 'backlog_timestamps': []}
         
         env = simpy.Environment()
         canal_rf = simpy.Resource(env, capacity=1)
