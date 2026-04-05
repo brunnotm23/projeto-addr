@@ -7,26 +7,31 @@ import matplotlib.pyplot as plt
 # --- 1. PARÂMETROS GERAIS E CONFIGURAÇÕES ---
 # =======================================================================
 
+# Definimos a escala base do sistema
+N_DEVICES = 10000
+
 CONFIG = {
-    'LAMBDA_IOT': 40.0,          # Taxa de chegada normal (logs/s)
-    'LAMBDA_CONSULTA': 10.0,     # Consultas de usuários (consultas/s)
+    'LAMBDA_IOT': N_DEVICES * 0.01,          # Taxa de chegada agregada
+    'LAMBDA_CONSULTA': 10,     # Consultas de usuários (consultas/s)
     'TEMPO_SIMULACAO': 1000,     # Tempo total (segundos)
     'INTERVALO_MONITOR': 0.1,    # Frequência do monitoramento
     'LARGURA_BANDA': 1e6,        # bps
     'TAMANHO_LOG_AVG': 1024 * 8, # bits
     'CAPACIDADE_BUFFER': 50,     # Capacidade da Fila (K)
-    'CAPACIDADE_BACKLOG': 1000,   # Memória RAM/Flash limitada dos dispositivos IoT
+    'CAPACIDADE_BACKLOG': N_DEVICES * 10,   # Memória total do cluster (ex: 10 logs por dispositivo)
     'CAPACIDADE_CPU': 1,
     'CAPACIDADE_DISCO': 1,
     'TEMPO_PROC_AVG': 0.002,
     'TEMPO_PROC_QUERY_AVG': 0.002,
+    'BACKOFF_BASE': 0.010,       # Tempo de espera base após falha de transmissão
     'TEMPO_DISCO_AVG': 0.003,
     'TEMPO_BUSCA_AVG': 0.010,
     'BER': 1e-7,                 # Bit Error Rate (Probabilidade de erro por bit)
-    'TENTATIVAS': 5,            # Máximo de retransmissões antes de descartar
+    'TENTATIVAS': 2,            # Máximo de retransmissões antes de descartar
     'JITTER_FACTOR': 0.05,       # Flutuação de 15% na capacidade do canal
-    'JITTER_MAX': 0.05,          # Jitter para o cenário 4
+    'JITTER_MAX': 0.5,          # Jitter para o cenário 4
     'JANELA_RECONEXAO': 5.0,     # Janela maior para reduzir colisão na volta
+    'BANDA_VARIAVEL_STEP': 50    # Frequência de alteração de banda para o cenário 3
 }
 
 CONFIG['MU_REDE'] = CONFIG['LARGURA_BANDA'] / CONFIG['TAMANHO_LOG_AVG']
@@ -65,6 +70,9 @@ def fluxo_completo_log(env, nome, canal_rf, cpu, disco, stats):
                 break
             else:
                 tentativas += 1
+                # Refinamento: Adiciona back-off exponencial para evitar re-tentativa imediata
+                atraso_backoff = CONFIG['BACKOFF_BASE'] * (2 ** (tentativas - 1))
+                yield env.timeout(atraso_backoff)
                 stats['logs_retransmissoes'] += 1
 
     if sucesso:
@@ -173,7 +181,11 @@ def gerador_trafego_iot(env, canal_rf, cpu, disco, stats, estado_rede, cenario =
     """Gera a chegada de logs. Se a rede cair, acumula no backlog."""
     i = 0
     while True:
-        yield env.timeout(random.expovariate(CONFIG['LAMBDA_IOT']))
+        # Refinamento: Para sinais vitais, uma mistura de periódico (90%) e aleatório (10%)
+        # é mais realista que o Poisson puro.
+        intervalo_periodico = 1.0 / CONFIG['LAMBDA_IOT']
+        jitter_chegada = random.uniform(0.9, 1.1) 
+        yield env.timeout(intervalo_periodico * jitter_chegada)
         i += 1
         
         if estado_rede['sinal_ativo']:
@@ -213,6 +225,17 @@ def evento_queda_sinal(env, canal_rf, cpu, disco, stats, estado_rede):
     
     estado_rede['backlog'] = 0
 
+def evento_banda_dinamica(env):
+    """CENÁRIO 3: Altera a largura de banda ciclicamente para simular condições variáveis de rede."""
+    niveis_banda = [200e3, 500e3, 2e6, 1e6] # Oscila entre péssima e excelente
+    idx = 0
+    while True:
+        CONFIG['LARGURA_BANDA'] = niveis_banda[idx]
+        CONFIG['MU_REDE'] = CONFIG['LARGURA_BANDA'] / CONFIG['TAMANHO_LOG_AVG']
+        print(f"[{env.now:.1f}s] BANDA DINÂMICA: Canal alterado para {CONFIG['LARGURA_BANDA']/1e3:.0f} kbps")
+        
+        yield env.timeout(CONFIG['BANDA_VARIAVEL_STEP'])
+        idx = (idx + 1) % len(niveis_banda)
 
 def monitorar_sistema(env, canal_rf, stats):
     """Coleta amostras do estado da fila."""
@@ -248,7 +271,7 @@ def imprimir_relatorio(stats):
     print(f"Utilização Média do Canal: {utilizacao_media:.2f}%")
     
     latencia_rede = np.mean(stats['latencia_rede']) * 1000 if stats['latencia_rede'] else 0
-    print(f"Latência Média de Rede: {latencia_rede:.2f} ms")
+    print(f"Latência Média de Rede (Age of Information): {latencia_rede:.2f} ms")
     print(f"Jitter Médio de Rede (PDV): {jitter_medio:.2f} ms")
     print(f"Número Médio de Logs no Sistema (L): {l_medio:.2f}")
 
@@ -256,9 +279,9 @@ def imprimir_relatorio(stats):
     print(f"Logs Salvos com Sucesso: {stats['logs_armazenados']}")
     
     latencia_end = np.mean(stats['latencia_ponta_a_ponta']) * 1000 if stats['latencia_ponta_a_ponta'] else 0
+    print(f"Latência Média E2E (Geração até Armazenamento): {latencia_end:.2f} ms")
     desvio = np.std(stats['latencia_ponta_a_ponta']) * 1000 if stats['latencia_ponta_a_ponta'] else 0
     print(f"Desvio Latência E2E: {desvio:.2f} ms")
-    print(f"Latência Média E2E: {latencia_end:.2f} ms")
 
 
 def plotar_graficos(stats, cenario):
@@ -266,8 +289,9 @@ def plotar_graficos(stats, cenario):
     titulos = {
         '1': 'Cenário 1: Operação Normal (Tráfego Contínuo)',
         '2': 'Cenário 2: Falha de Sinal e Reconexão em Massa',
-        '3': 'Cenário 3: Largura de Banda Variável',
-        '4': 'Cenário 4: Instabilidade de Rede (Jitter)'
+        '3': 'Cenário 3: Banda Instável',
+        '4': 'Cenário 4: Instabilidade de Rede (Jitter)',
+        '5': 'Comparativo Bandas (Baixa, Média e Alta)'
     }
 
     titulo_base = titulos.get(cenario, "Simulação IoT")
@@ -324,7 +348,7 @@ def executar_simulacao(cenario_escolhido):
         'logs_perda_memoria_dispositivo': 0, 'logs_retransmissoes': 0, 
         'logs_falha_transmissao': 0,
         'consultas_geradas': 0, 'consultas_completas': 0,
-        'latencia_rede': [], 'jitter_rede': [], 'latencia_ponta_a_ponta': [], 
+        'latencia_rede': [], 'jitter_rede': [], 'latencia_ponta_a_ponta': [],
         'tempos_fim_e2e': [],
         'latencia_recuperacao': [],
         'ocupacao_sistema': [], 'utilizacao_canal': [], 'amostras_tempo': []
@@ -346,6 +370,9 @@ def executar_simulacao(cenario_escolhido):
     # Processo Específico do Cenário 2
     if cenario_escolhido == '2':
         env.process(evento_queda_sinal(env, canal_rf, servidor_cpu, armazenamento_disco, stats, estado_rede))
+
+    if cenario_escolhido == '3':
+        env.process(evento_banda_dinamica(env))
 
     # Roda a simulação
     env.run(until=CONFIG['TEMPO_SIMULACAO']) 
@@ -423,7 +450,7 @@ def executar_simulacao_comparativa():
             'logs_perda_memoria_dispositivo': 0, 'logs_retransmissoes': 0, 
             'logs_falha_transmissao': 0,
             'consultas_geradas': 0, 'consultas_completas': 0,
-            'latencia_rede': [], 'jitter_rede': [], 'latencia_ponta_a_ponta': [], 
+            'latencia_rede': [], 'jitter_rede': [], 'latencia_ponta_a_ponta': [],
             'tempos_fim_e2e': [],
             'latencia_recuperacao': [],
             'ocupacao_sistema': [], 'utilizacao_canal': [], 'amostras_tempo': []
@@ -446,7 +473,7 @@ def executar_simulacao_comparativa():
         # Micro relatório rápido
         latencia = np.mean(stats['latencia_ponta_a_ponta']) * 1000 if stats['latencia_ponta_a_ponta'] else 0
         prob_bloqueio = (stats['logs_perda_buffer'] / stats['logs_gerados']) * 100 if stats['logs_gerados'] > 0 else 0
-        print(f" > Descartes: {stats['logs_perda_buffer']} ({prob_bloqueio:.1f}%) | Latência Média: {latencia:.2f} ms")
+        print(f" > Descartes por Buffer Cheio: {stats['logs_perda_buffer']} ({prob_bloqueio:.1f}%) | Latência Média: {latencia:.2f} ms")
 
     # Reseta pra não contaminar próximas execuções via menu
     CONFIG['LARGURA_BANDA'] = 1e6
@@ -463,20 +490,21 @@ def main():
         print("Escolha o cenário que deseja executar:")
         print("1 - Cenário Normal (Tráfego Contínuo)")
         print("2 - Cenário de Falha (Queda de Sinal e Reconexão em Massa)")
-        print("3 - Cenário com Largura de Banda Variável (Baixa, Média, Alta)")
+        print("3 - Cenário com Banda Instável (Variável durante a execução)")
         print("4 - Cenário com Instabilidade de Rede (Jitter)")
+        print("5 - Comparativo de Bandas (Baixa, Média e Alta)")
         print("0 - Sair do Programa")
         
-        escolha = input("Digite a opção (0, 1, 2, 3 ou 4): ").strip()
+        escolha = input("Digite a opção (0, 1, 2, 3, 4 ou 5): ").strip()
         
         if escolha == '0':
             print("Encerrando o simulador")
             break
-        elif escolha in ['1', '2', '4']:
+        elif escolha in ['1', '2', '3', '4']:
             CONFIG['LARGURA_BANDA'] = 1e6
             CONFIG['MU_REDE'] = CONFIG['LARGURA_BANDA'] / CONFIG['TAMANHO_LOG_AVG']
             executar_simulacao(escolha)
-        elif escolha == '3':
+        elif escolha == '5':
             print("\nEscolha o perfil de Largura de Banda:")
             print("1 - Baixa (100 Kbps - Possível gargalo)")
             print("2 - Média (1 Mbps - Padrão)")
@@ -496,7 +524,7 @@ def main():
                 CONFIG['LARGURA_BANDA'] = 1e6 # Default (Media)
                 
             CONFIG['MU_REDE'] = CONFIG['LARGURA_BANDA'] / CONFIG['TAMANHO_LOG_AVG']
-            executar_simulacao('3')
+            executar_simulacao('5')
         else:
             print("Opção inválida! Por favor, tente novamente")
 
