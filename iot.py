@@ -7,8 +7,8 @@ import matplotlib.pyplot as plt
 # --- 1. PARÂMETROS GERAIS E CONFIGURAÇÕES ---
 # =======================================================================
 
-# Definimos a escala base do sistema
-N_DEVICES = 10000
+# ESCALA BASE DO SISTEMA
+N_DISPOSITIVOS = 10000
 
 CONFIG = {
     'LAMBDA_IOT': N_DEVICES * 0.01,          # Taxa de chegada agregada
