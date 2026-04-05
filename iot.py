@@ -86,6 +86,7 @@ def fluxo_completo_log(env, nome, canal_rf, cpu, disco, stats):
         yield env.timeout(random.expovariate(1.0 / CONFIG['TEMPO_DISCO_AVG']))
         
     stats['logs_armazenados'] += 1
+    stats['tempos_fim_e2e'].append(env.now)
 
     stats['latencia_ponta_a_ponta'].append(env.now - chegada_sistema)
 
@@ -142,6 +143,7 @@ def fluxo_com_jitter(env, nome, canal_rf, cpu, disco, stats):
         yield env.timeout(random.expovariate(1.0 / CONFIG['TEMPO_DISCO_AVG']))
         
     stats['logs_armazenados'] += 1
+    stats['tempos_fim_e2e'].append(env.now)
 
     stats['latencia_ponta_a_ponta'].append(env.now - chegada_sistema)
 
@@ -270,10 +272,10 @@ def plotar_graficos(stats, cenario):
 
     titulo_base = titulos.get(cenario, "Simulação IoT")
 
-    plt.figure(figsize=(14, 10))
+    plt.figure(figsize=(14, 15))
 
     # Gráfico 1: Ocupação do Buffer (Crucial para ver a reconexão em massa)
-    plt.subplot(2, 1, 1)
+    plt.subplot(3, 1, 1)
     plt.plot(stats['amostras_tempo'], stats['ocupacao_sistema'], color='orange', linewidth=1)
     plt.axhline(y=CONFIG['CAPACIDADE_BUFFER'], color='r', linestyle='--', label='Capacidade Máxima (K)')
     plt.title(f'{titulo_base} - Ocupação do Gateway')
@@ -281,11 +283,20 @@ def plotar_graficos(stats, cenario):
     plt.ylabel('Logs no Sistema')
     plt.legend()
 
-    # Gráfico 2: Histograma de Latência
-    plt.subplot(2, 1, 2)
+    # Gráfico 2: Latência vs Tempo de Simulação (Evolução Temporal)
+    plt.subplot(3, 1, 2)
+    if stats['latencia_ponta_a_ponta'] and stats['tempos_fim_e2e']:
+        latencias_ms = [t * 1000 for t in stats['latencia_ponta_a_ponta']]
+        plt.scatter(stats['tempos_fim_e2e'], latencias_ms, s=10, alpha=0.4, color='green', label='Log Individual')
+        plt.title(f'{titulo_base} - Evolução da Latência E2E')
+        plt.xlabel('Tempo de Simulação (s)')
+        plt.ylabel('Latência (ms)')
+
+    # Gráfico 3: Histograma de Latência
+    plt.subplot(3, 1, 3)
     if stats['latencia_ponta_a_ponta']:
-        plt.hist([t * 1000 for t in stats['latencia_ponta_a_ponta']], bins=40, color='skyblue', edgecolor='black')
-        plt.title(f'{titulo_base} - Latência E2E')
+        plt.hist([t * 1000 for t in stats['latencia_ponta_a_ponta']], bins=50, color='skyblue', edgecolor='black')
+        plt.title(f'{titulo_base} - Distribuição da Latência E2E (Histograma)')
         plt.xlabel('Tempo (ms)')
         plt.ylabel('Frequência')
 
@@ -310,14 +321,12 @@ def executar_simulacao(cenario_escolhido):
     # Estruturas de Dados zeradas para cada nova execução
     stats = {
         'logs_gerados': 0, 'logs_perda_buffer': 0, 'logs_armazenados': 0,
-        'logs_perda_memoria_dispositivo': 0,
-        'logs_retransmissoes': 0, 'logs_falha_transmissao': 0,
-        'logs_perda_memoria_dispositivo': 0,
-        'logs_retransmissoes': 0, 'logs_falha_transmissao': 0,
-        'consultas_geradas': 0, 'consultas_completas': 0,
         'logs_perda_memoria_dispositivo': 0, 'logs_retransmissoes': 0, 
-        'logs_falha_transmissao': 0, 'consultas_geradas': 0, 'consultas_completas': 0,
-        'latencia_rede': [], 'jitter_rede': [], 'latencia_ponta_a_ponta': [], 'latencia_recuperacao': [],
+        'logs_falha_transmissao': 0,
+        'consultas_geradas': 0, 'consultas_completas': 0,
+        'latencia_rede': [], 'jitter_rede': [], 'latencia_ponta_a_ponta': [], 
+        'tempos_fim_e2e': [],
+        'latencia_recuperacao': [],
         'ocupacao_sistema': [], 'utilizacao_canal': [], 'amostras_tempo': []
     }
     
@@ -348,11 +357,11 @@ def executar_simulacao(cenario_escolhido):
 
 def plotar_graficos_comparativos(resultados):
     """Plota os resultados comparativos das 3 bandas sobrepostas."""
-    plt.figure(figsize=(14, 10))
+    plt.figure(figsize=(14, 15))
     cores = ['red', 'blue', 'green']
     
     # Gráfico 1: Ocupação do Buffer
-    plt.subplot(2, 1, 1)
+    plt.subplot(3, 1, 1)
     for (nome, stats), cor in zip(resultados.items(), cores):
         plt.plot(stats['amostras_tempo'], stats['ocupacao_sistema'], label=nome, color=cor, linewidth=1.5, alpha=0.8)
         
@@ -362,8 +371,19 @@ def plotar_graficos_comparativos(resultados):
     plt.ylabel('Logs no Sistema')
     plt.legend()
 
-    # Gráfico 2: Histograma de Latência - Sobreposto
-    plt.subplot(2, 1, 2)
+    # Gráfico 2: Evolução da Latência E2E (Scatter) - Sobreposto
+    plt.subplot(3, 1, 2)
+    for (nome, stats), cor in zip(resultados.items(), cores):
+        if stats['latencia_ponta_a_ponta'] and stats['tempos_fim_e2e']:
+            latencias_ms = [t * 1000 for t in stats['latencia_ponta_a_ponta']]
+            plt.scatter(stats['tempos_fim_e2e'], latencias_ms, s=10, alpha=0.3, label=nome, color=cor)
+    plt.title('Comparativo: Evolução da Latência E2E ao longo do Tempo')
+    plt.xlabel('Tempo de Simulação (s)')
+    plt.ylabel('Latência (ms)')
+    plt.legend()
+
+    # Gráfico 3: Histograma de Latência - Sobreposto
+    plt.subplot(3, 1, 3)
     for (nome, stats), cor in zip(resultados.items(), cores):
         if stats['latencia_ponta_a_ponta']:
             plt.hist([t * 1000 for t in stats['latencia_ponta_a_ponta']], bins=30, alpha=0.5, label=nome, color=cor, edgecolor='black')
@@ -400,15 +420,12 @@ def executar_simulacao_comparativa():
         # Estruturas zeradas para esta rodada
         stats = {
             'logs_gerados': 0, 'logs_perda_buffer': 0, 'logs_armazenados': 0,
-            'logs_perda_memoria_dispositivo': 0,
-            'logs_retransmissoes': 0, 'logs_falha_transmissao': 0,
-            'logs_perda_memoria_dispositivo': 0,
-            'logs_retransmissoes': 0, 'logs_falha_transmissao': 0,
-            'consultas_geradas': 0, 'consultas_completas': 0,
             'logs_perda_memoria_dispositivo': 0, 'logs_retransmissoes': 0, 
-            'logs_falha_transmissao': 0, 'consultas_geradas': 0, 'consultas_completas': 0,
-            'latencia_rede': [], 'jitter_rede': [], 'latencia_ponta_a_ponta': [], 'latencia_recuperacao': [],
-            'latencia_rede': [], 'jitter_rede': [], 'latencia_ponta_a_ponta': [], 'latencia_recuperacao': [],
+            'logs_falha_transmissao': 0,
+            'consultas_geradas': 0, 'consultas_completas': 0,
+            'latencia_rede': [], 'jitter_rede': [], 'latencia_ponta_a_ponta': [], 
+            'tempos_fim_e2e': [],
+            'latencia_recuperacao': [],
             'ocupacao_sistema': [], 'utilizacao_canal': [], 'amostras_tempo': []
         }
         estado_rede = {'sinal_ativo': True, 'backlog': 0}
