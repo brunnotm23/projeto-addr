@@ -179,10 +179,11 @@ def executar_busca(env, cpu, disco, stats):
 
 def gerador_trafego_iot(env, canal_rf, cpu, disco, stats, estado_rede, cenario = ''):
     """Gera a chegada de logs. Se a rede cair, acumula no backlog."""
+    
     i = 0
     while True:
         i += 1
-        
+        yield env.timeout(random.expovariate(CONFIG['LAMBDA_IOT']))
         if estado_rede['sinal_ativo']:
             if cenario == '4':
                 env.process(fluxo_com_jitter(env, f'Log_{i}', canal_rf, cpu, disco, stats))
