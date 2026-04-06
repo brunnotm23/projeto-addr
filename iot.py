@@ -181,11 +181,6 @@ def gerador_trafego_iot(env, canal_rf, cpu, disco, stats, estado_rede, cenario =
     """Gera a chegada de logs. Se a rede cair, acumula no backlog."""
     i = 0
     while True:
-        # Refinamento: Para sinais vitais, uma mistura de periódico (90%) e aleatório (10%)
-        # é mais realista que o Poisson puro.
-        intervalo_periodico = 1.0 / CONFIG['LAMBDA_IOT']
-        jitter_chegada = random.uniform(0.9, 1.1) 
-        yield env.timeout(intervalo_periodico * jitter_chegada)
         i += 1
         
         if estado_rede['sinal_ativo']:
